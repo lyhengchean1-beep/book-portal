@@ -1,10 +1,19 @@
+# Dependencies and build output
 node_modules
 .next
 out
-data
-.env
-.env.local
-*.log
-public/pdf.worker.min.mjs
 next-env.d.ts
 tsconfig.tsbuildinfo
+*.log
+
+# Secrets. .env holds the Google client secret, the Gemini key and the database
+# password - it is created by hand on each machine and never committed.
+.env
+.env.*
+!.env.example
+
+# Runtime data: first-page thumbnails.
+data/
+
+# Copied out of node_modules by scripts/copy-pdf-worker.mjs on npm install.
+public/pdf.worker.min.mjs

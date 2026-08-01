@@ -1,3 +1,9 @@
+# An explicit project name, so containers, networks and volumes are namespaced
+# regardless of what the directory is called. Without it Compose derives the
+# name from the folder, and two projects in similarly named folders can end up
+# fighting over the same resources.
+name: book-portal
+
 services:
   mysql:
     image: mysql:8.0
@@ -12,7 +18,10 @@ services:
     # correctly. MySQL 8 defaults to this, but being explicit costs nothing.
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
-      - portal_mysqldata:/var/lib/mysql
+      - mysqldata:/var/lib/mysql
+    # Deliberately no `ports:`. The app reaches this over the compose network,
+    # so nothing is published on the host and there is no chance of colliding
+    # with a MySQL another project already has on 3306.
     healthcheck:
       # Runs MySQL's own client inside the MySQL container, so there is no
       # MariaDB-client TLS mismatch to work around. No --silent: if the ping
@@ -32,12 +41,15 @@ services:
       mysql:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # Host 3100, container 3000. Change the left number only - the right one
+      # is what Next.js listens on inside the container. 3100 keeps this clear
+      # of anything already using 3000 on the host.
+      - "${HOST_PORT:-3100}:3000"
     volumes:
       # First-page thumbnails. Nothing else needs mounting - Drive access is
       # granted by each user at sign-in, so there are no key files to manage.
-      - portal_data:/app/data
+      - data:/app/data
 
 volumes:
-  portal_mysqldata:
-  portal_data:
+  mysqldata:
+  data:
