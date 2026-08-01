@@ -1,0 +1,10 @@
+node_modules
+.next
+out
+data
+.env
+.env.local
+*.log
+public/pdf.worker.min.mjs
+next-env.d.ts
+tsconfig.tsbuildinfo

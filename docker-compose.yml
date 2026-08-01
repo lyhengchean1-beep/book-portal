@@ -1,0 +1,43 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: portal_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    # utf8mb4 end to end, so Khmer titles and author names store and sort
+    # correctly. MySQL 8 defaults to this, but being explicit costs nothing.
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - portal_mysqldata:/var/lib/mysql
+    healthcheck:
+      # Runs MySQL's own client inside the MySQL container, so there is no
+      # MariaDB-client TLS mismatch to work around. No --silent: if the ping
+      # fails you want to see why, not watch an endless "waiting" loop.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  app:
+    build: .
+    container_name: portal_app
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    volumes:
+      # First-page thumbnails. Nothing else needs mounting - Drive access is
+      # granted by each user at sign-in, so there are no key files to manage.
+      - portal_data:/app/data
+
+volumes:
+  portal_mysqldata:
+  portal_data:

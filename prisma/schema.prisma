@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  VIEWER   // can browse and read
+  UPLOADER // can add books
+  ADMIN    // can add and remove books
+}
+
+enum BookStatus {
+  PENDING // row created, Drive upload not confirmed yet
+  READY   // file is on Drive and shared
+  FAILED  // upload failed; row kept for auditing
+}
+
+model User {
+  id        String   @id @default(cuid())
+  googleSub String   @unique
+  email     String   @unique
+  name      String?
+  image     String?  @db.Text // Google avatar URLs run past 191 characters
+  role      Role     @default(VIEWER)
+  createdAt DateTime @default(now())
+
+  // Granted at sign-in, when the user approves Drive access. Used to upload on
+  // their behalf later, when there is no live session to borrow a token from.
+  driveRefreshToken String? @db.Text
+
+  // Where this person's uploads go. driveId is null for My Drive, or the ID of
+  // a Shared Drive. Both names are cached so the UI can show the choice back
+  // without another Drive round trip.
+  driveId    String?
+  driveName  String?
+  folderId   String?
+  folderName String?
+
+  books     Book[]
+}
+
+model Faculty {
+  id    String @id @default(cuid())
+  code  String @unique @db.VarChar(8) // shown on the record card, e.g. AGR
+  name  String @unique @db.VarChar(191)
+  books Book[]
+}
+
+model Book {
+  id          String     @id @default(cuid())
+  // Prisma maps String to VARCHAR(191) on MySQL, which is shorter than some
+  // real book titles, so the longer columns are declared explicitly.
+  title       String     @db.VarChar(300)
+  author      String     @db.VarChar(200)
+  year        Int?
+  isbn        String?    @db.VarChar(20)
+  description String?    @db.Text
+
+  facultyId   String
+  faculty     Faculty    @relation(fields: [facultyId], references: [id])
+
+  // Store the Drive file ID, never the URL. IDs are permanent, URLs are not.
+  driveFileId String?    @unique
+  mimeType    String     @default("application/pdf")
+  sizeBytes   Int
+  pageCount   Int?
+  hasThumb    Boolean    @default(false)
+
+  status      BookStatus @default(PENDING)
+  failReason  String?    @db.Text
+
+  uploadedById String
+  uploadedBy   User      @relation(fields: [uploadedById], references: [id])
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([facultyId, status, createdAt])
+  @@index([title])
+}
+
+/// Caches "which subfolder holds this faculty's books, inside this person's
+/// main folder". Purely a lookup cache - if a row goes stale the folder is
+/// found or recreated on the next upload, so no relations or cascades needed.
+/// Caches "which subfolder holds this faculty's books, inside this person's
+/// main folder". Purely a lookup cache - if a row goes stale the folder is
+/// found or recreated on the next upload, so no relations or cascades needed.
+model FacultyFolder {
+  id        String   @id @default(cuid())
+  // Explicit lengths: three VARCHAR(191) utf8mb4 columns in one unique index
+  // come to 2292 bytes, over MySQL's 1000-byte key limit. cuids are 25 chars
+  // and Drive IDs around 33, so 64 is comfortable and 3 x 64 x 4 = 768 fits.
+  userId    String   @db.VarChar(64)
+  facultyId String   @db.VarChar(64)
+  parentId  String   @db.VarChar(64) // the main folder the subfolder lives in
+  folderId  String   @db.VarChar(64)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, facultyId, parentId])
+  @@index([userId])
+}
