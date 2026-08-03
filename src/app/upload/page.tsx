@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { auth, canUpload } from "@/auth";
+import { auth, canUpload, canAdmin } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { ROOT_FOLDER_NAME, activeYearFolderName } from "@/lib/drive";
 import Nav from "@/components/Nav";
 import UploadForm from "@/components/UploadForm";
 
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function UploadPage() {
   const session = await auth();
   if (!session) redirect("/");
+
   if (!canUpload(session.user.role)) {
     return (
       <>
@@ -25,14 +27,12 @@ export default async function UploadPage() {
     );
   }
 
-  // No destination yet means this is their first upload - pick a folder first.
-  const me = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { folderId: true, folderName: true, driveName: true },
-  });
-  if (!me?.folderId) redirect("/storage");
-
-  const faculties = await prisma.faculty.findMany({ orderBy: { name: "asc" } });
+  // No folder to choose any more - everyone writes to the same library Drive,
+  // so the old redirect to /storage on first upload is gone.
+  const [faculties, year] = await Promise.all([
+    prisma.faculty.findMany({ orderBy: { name: "asc" } }),
+    activeYearFolderName(),
+  ]);
   const maxMb = Number(process.env.MAX_UPLOAD_MB ?? 50);
 
   return (
@@ -43,11 +43,14 @@ export default async function UploadPage() {
         <h1 className="max-w-2xl text-[clamp(2rem,5vw,3.25rem)]">Add a book</h1>
         <p className="mt-4 max-w-xl text-ink-soft">
           Check that page one looks right before you save. The file is filed under{" "}
-          {me.driveName} / {me.folderName} / <span className="whitespace-nowrap">its faculty</span>,
-          and the link is opened for viewing straight away.{" "}
-          <Link href="/storage" className="underline hover:text-signal">
-            Change folder
-          </Link>
+          {ROOT_FOLDER_NAME} / {year} /{" "}
+          <span className="whitespace-nowrap">the faculty you choose</span>, and the link
+          is opened for viewing straight away.{" "}
+          {canAdmin(session.user.role) && (
+            <Link href="/storage" className="underline hover:text-signal">
+              Change the year
+            </Link>
+          )}
         </p>
 
         <div className="mt-12">

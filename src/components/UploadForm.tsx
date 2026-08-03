@@ -1,9 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useFileDrop } from "@/hooks/use-file-drop";
+import UploadToasts, { type Toast } from "./UploadToasts";
 import type { PlateResult } from "./FirstPagePlate";
 
 // pdf.js touches the DOM, so this never renders on the server.
@@ -34,6 +35,13 @@ export default function UploadForm({
   const [author, setAuthor] = useState("");
   const [facultyId, setFacultyId] = useState("");
   const [filled, setFilled] = useState<Filled>({ title: false, author: false });
+
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [added, setAdded] = useState(0);
+
+  const dismiss = useCallback((id: string) => {
+    setToasts((list) => list.filter((t) => t.id !== id));
+  }, []);
 
   // Read inside handlePlate, which runs after an await, so it must not close
   // over a stale render's value.
@@ -100,9 +108,7 @@ export default function UploadForm({
       // Fill blanks and replace the local guess, but never touch what someone
       // typed by hand.
       if (t) {
-        setTitle((current) =>
-          !current.trim() || filledRef.current.title ? t : current,
-        );
+        setTitle((current) => (!current.trim() || filledRef.current.title ? t : current));
       }
       if (a) setAuthor((current) => (current.trim() ? current : a));
 
@@ -120,6 +126,20 @@ export default function UploadForm({
   const ready = Boolean(file && plate && title.trim() && author.trim() && facultyId);
   const chosenFaculty = faculties.find((f) => f.id === facultyId);
 
+  /**
+   * Clears everything the next book needs to be different, and deliberately
+   * keeps the faculty: books arrive in runs from one faculty at a time, and the
+   * choice stays visible on screen either way.
+   */
+  function resetForNextBook() {
+    setFile(null);
+    setPlate(null);
+    setTitle("");
+    setAuthor("");
+    setFilled({ title: false, author: false });
+    setError(null);
+  }
+
   async function submit() {
     if (!file || !ready) return;
     setSaving(true);
@@ -135,18 +155,26 @@ export default function UploadForm({
       body.set("pageCount", String(plate.pageCount));
     }
 
+    const savedTitle = title;
+
     try {
       const res = await fetch("/api/books", { method: "POST", body });
       const json = await res.json();
-      if (res.status === 409 && json.needsStorage) {
-        router.push("/storage");
-        return;
-      }
       if (!res.ok) throw new Error(json.error ?? "The upload did not finish.");
-      router.push(`/books/${json.book.id}`);
+
+      // Stay put. The book is announced, offered, and the form is ready for the
+      // next one - being thrown onto a record page after every upload made
+      // adding a stack of books needlessly slow.
+      setToasts((list) => [
+        ...list,
+        { id: json.book.id, title: savedTitle, bookId: json.book.id },
+      ]);
+      setAdded((n) => n + 1);
+      resetForNextBook();
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "The upload did not finish.");
+    } finally {
       setSaving(false);
     }
   }
@@ -166,6 +194,8 @@ export default function UploadForm({
           </div>
         </div>
       )}
+
+      <UploadToasts toasts={toasts} onDone={dismiss} />
 
       <div className="grid gap-10 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)] lg:gap-14">
         {/* Left: the plate, which doubles as the drop target */}
@@ -295,9 +325,11 @@ export default function UploadForm({
             <p className="accession max-w-[40ch] leading-relaxed">
               {saving
                 ? "Uploading to Drive and opening the link. Keep this tab open."
-                : chosenFaculty
-                  ? `Files into ${chosenFaculty.name}, set to view mode.`
-                  : "The link is set to view mode automatically once it uploads."}
+                : added > 0 && !file
+                  ? `${added} book${added === 1 ? "" : "s"} added. Drop the next PDF to carry on.`
+                  : chosenFaculty
+                    ? `Files into ${chosenFaculty.name}, set to view mode.`
+                    : "The link is set to view mode automatically once it uploads."}
             </p>
           </div>
         </div>

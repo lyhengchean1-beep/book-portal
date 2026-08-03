@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { auth, canUpload, signOut } from "@/auth";
+import { auth, canUpload, canAdmin, signOut } from "@/auth";
 import NavLinks from "./NavLinks";
 
 export default async function Nav() {
@@ -21,7 +21,10 @@ export default async function Nav() {
           <span className="hidden sm:inline">Book Portal</span>
         </Link>
 
-        <NavLinks canUpload={canUpload(session.user.role)} />
+        <NavLinks
+          canUpload={canUpload(session.user.role)}
+          canAdmin={canAdmin(session.user.role)}
+        />
 
         <div className="flex shrink-0 items-center gap-3">
           <span className="accession hidden max-w-[22ch] truncate lg:inline">
