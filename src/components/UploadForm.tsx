@@ -27,9 +27,13 @@ export default function UploadForm({
 
   const [file, setFile] = useState<File | null>(null);
   const [plate, setPlate] = useState<PlateResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [reading, setReading] = useState(false);
+
+  // Only for problems with the file itself, shown beside the drop zone because
+  // that is what they are about. Everything that happens on submit goes to a
+  // toast instead, so nothing has to be dismissed by hand.
+  const [fileError, setFileError] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
@@ -43,13 +47,17 @@ export default function UploadForm({
     setToasts((list) => list.filter((t) => t.id !== id));
   }, []);
 
+  function pushToast(toast: Omit<Toast, "id">) {
+    setToasts((list) => [...list, { ...toast, id: crypto.randomUUID() }]);
+  }
+
   // Read inside handlePlate, which runs after an await, so it must not close
   // over a stale render's value.
   const filledRef = useRef(filled);
   filledRef.current = filled;
 
   function accept(next: File | null) {
-    setError(null);
+    setFileError(null);
     setPlate(null);
 
     // Suggested values belong to the old file, so they go with it. Anything
@@ -62,11 +70,11 @@ export default function UploadForm({
 
     if (next.type && next.type !== "application/pdf" && !/\.pdf$/i.test(next.name)) {
       setFile(null);
-      return setError("Only PDF files can be added to the library.");
+      return setFileError("Only PDF files can be added to the library.");
     }
     if (next.size > maxMb * 1024 * 1024) {
       setFile(null);
-      return setError(
+      return setFileError(
         `That file is ${(next.size / 1024 / 1024).toFixed(1)} MB. The limit is ${maxMb} MB.`,
       );
     }
@@ -137,13 +145,12 @@ export default function UploadForm({
     setTitle("");
     setAuthor("");
     setFilled({ title: false, author: false });
-    setError(null);
+    setFileError(null);
   }
 
   async function submit() {
     if (!file || !ready) return;
     setSaving(true);
-    setError(null);
 
     const body = new FormData();
     body.set("file", file);
@@ -155,25 +162,45 @@ export default function UploadForm({
       body.set("pageCount", String(plate.pageCount));
     }
 
-    const savedTitle = title;
+    const savedTitle = title.trim();
 
     try {
       const res = await fetch("/api/books", { method: "POST", body });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "The upload did not finish.");
+
+      if (!res.ok) {
+        // The server refused it - most often because the same title and author
+        // are already catalogued. Offer the existing record instead of just
+        // saying no, and leave the form filled in so nothing has to be retyped.
+        pushToast({
+          kind: "error",
+          title: json.error ?? "The upload did not finish.",
+          detail: json.detail,
+          href: json.duplicateId ? `/books/${json.duplicateId}` : undefined,
+          linkLabel: "Open the book already in the library",
+        });
+        return;
+      }
 
       // Stay put. The book is announced, offered, and the form is ready for the
       // next one - being thrown onto a record page after every upload made
       // adding a stack of books needlessly slow.
-      setToasts((list) => [
-        ...list,
-        { id: json.book.id, title: savedTitle, bookId: json.book.id },
-      ]);
+      pushToast({
+        kind: "success",
+        title: "Added to the library",
+        detail: savedTitle,
+        href: `/books/${json.book.id}`,
+        linkLabel: "Open the record",
+      });
       setAdded((n) => n + 1);
       resetForNextBook();
       router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The upload did not finish.");
+    } catch {
+      pushToast({
+        kind: "error",
+        title: "The upload did not finish.",
+        detail: "Check the connection and try again. Nothing was saved.",
+      });
     } finally {
       setSaving(false);
     }
@@ -207,10 +234,16 @@ export default function UploadForm({
             onPick={() => inputRef.current?.click()}
             onRendered={handlePlate}
             onError={(m) => {
-              setError(m);
+              setFileError(m);
               setFile(null);
             }}
           />
+
+          {fileError && (
+            <p role="alert" className="notice notice-error mt-4">
+              {fileError}
+            </p>
+          )}
 
           {file && (
             <div className="mt-4 flex flex-wrap gap-2">
@@ -306,12 +339,6 @@ export default function UploadForm({
               </select>
             </div>
           </div>
-
-          {error && (
-            <p role="alert" className="notice notice-error mt-6">
-              {error}
-            </p>
-          )}
 
           <div className="mt-8 flex flex-wrap items-center gap-4 border-t border-line pt-6">
             <button

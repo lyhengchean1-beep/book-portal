@@ -15,17 +15,17 @@ export const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS ?? "")
   .filter(Boolean);
 
 /**
- * What an ordinary sign-in asks for.
+ * How long a sign-in lasts, in hours. Default 8 - one working day.
  *
- * All three are non-sensitive, so Google shows no unverified-app warning, the
- * app needs no verification, and there is no 100-user cap. That is what lets
- * anybody with a Google account use the library.
- *
- * Drive is deliberately absent. It is a restricted scope, and asking every
- * visitor for it is what produced the red warning screen - as well as being far
- * more access than a reader needs. Only the library account grants it, once,
- * from the Storage page.
+ * The library is read on shared computers, and NextAuth's own default of 30
+ * days means the next person to sit down is still signed in as whoever used it
+ * last. Making the cookie expire on browser close is not an option: Chrome
+ * restores cookies on restart, so a session cookie outlives the window anyway.
+ * A short lifetime is the only thing that actually works.
  */
+const SESSION_HOURS = Number(process.env.SESSION_HOURS ?? 8) || 8;
+const SESSION_MAX_AGE = SESSION_HOURS * 60 * 60;
+
 const BASE_SCOPES = ["openid", "email", "profile"];
 
 /** Requested only by the "Connect the library Drive" action. */
@@ -34,26 +34,38 @@ export const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
 /** Scope string for that one action: the basics plus Drive. */
 export const OWNER_SCOPES = [...BASE_SCOPES, DRIVE_SCOPE].join(" ");
 
-/**
- * The half of the config that must run on the Edge runtime, because
- * middleware.ts imports it. Nothing here may touch Prisma, Node APIs, or the
- * filesystem. The database-backed callbacks live in auth.ts.
- */
 export const authConfig = {
   providers: [
     Google({
       authorization: {
         params: {
           scope: BASE_SCOPES.join(" "),
-          // Narrows Google's account picker to one domain. Undefined when
-          // ALLOWED_EMAIL_DOMAINS is blank, which is the open case.
+          // Always show the account chooser. Without this, Google silently
+          // reuses whichever account is already signed in to the browser - so
+          // on a shared machine the portal session expiring achieves nothing,
+          // because the next click signs the same person straight back in.
+          prompt: "select_account",
           hd: allowedDomains[0] || undefined,
         },
       },
     }),
   ],
-  session: { strategy: "jwt" },
+
+  session: {
+    strategy: "jwt",
+    maxAge: SESSION_MAX_AGE,
+    // Rolling: the clock resets on activity, at most once an hour. Somebody
+    // reading for a whole afternoon is never thrown out mid-book, while an
+    // abandoned session dies SESSION_HOURS after the last page view.
+    updateAge: 60 * 60,
+  },
+
+  // Kept in step with the cookie, so a stolen token cannot outlive the session
+  // it belongs to.
+  jwt: { maxAge: SESSION_MAX_AGE },
+
   pages: { signIn: "/", error: "/" },
+
   callbacks: {
     signIn({ profile }) {
       const email = profile?.email?.toLowerCase();

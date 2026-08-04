@@ -47,10 +47,8 @@ export async function GET(req: Request) {
  * POST /api/books - multipart form: file + metadata + thumbnail data URL.
  *
  * The file goes into the shared library Drive, under
- * <root> / <year> / <faculty>. The uploader's own Drive is never touched, so
- * there is nothing for them to configure before their first upload. The
- * database row is written first as PENDING, so a failed upload can never leave
- * an untracked file behind.
+ * <root> / <year> / <faculty>. The database row is written first as PENDING, so
+ * a failed upload can never leave an untracked file behind.
  */
 export async function POST(req: Request) {
   const session = await auth();
@@ -82,9 +80,38 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const meta = parsed.data;
 
-  const faculty = await prisma.faculty.findUnique({ where: { id: meta.facultyId } });
+  // Trimmed once here and used for both the duplicate check and the row, so a
+  // stray trailing space can never make the same book look like a new one.
+  const title = parsed.data.title.trim();
+  const author = parsed.data.author.trim();
+  const { facultyId, pageCount } = parsed.data;
+
+  /**
+   * A thesis is identified well enough by its title and its author, so the pair
+   * is treated as unique. Enforced here rather than by a database index because
+   * a retry after a failed upload must still be allowed: only READY rows count,
+   * and the PENDING and FAILED rows left by earlier attempts are ignored.
+   *
+   * The comparison is case-insensitive for free - that is MySQL's default
+   * collation - so "SOTH CHANNAVY" will not slip past "Soth Channavy".
+   */
+  const duplicate = await prisma.book.findFirst({
+    where: { status: "READY", title, author },
+    select: { id: true, title: true, author: true },
+  });
+  if (duplicate) {
+    return NextResponse.json(
+      {
+        error: "This book is already in the library.",
+        detail: `${duplicate.title} — ${duplicate.author}`,
+        duplicateId: duplicate.id,
+      },
+      { status: 409 },
+    );
+  }
+
+  const faculty = await prisma.faculty.findUnique({ where: { id: facultyId } });
   if (!faculty) {
     return NextResponse.json({ error: "That faculty no longer exists." }, { status: 400 });
   }
@@ -106,11 +133,11 @@ export async function POST(req: Request) {
   // 1. Reserve the row.
   const book = await prisma.book.create({
     data: {
-      title: meta.title,
-      author: meta.author,
-      facultyId: meta.facultyId,
+      title,
+      author,
+      facultyId,
       sizeBytes: pdf.size,
-      pageCount: meta.pageCount ?? null,
+      pageCount: pageCount ?? null,
       uploadedById: session.user.id,
       status: "PENDING",
     },
@@ -133,7 +160,7 @@ export async function POST(req: Request) {
 
     // 4. Upload the PDF into that folder.
     const buffer = Buffer.from(await pdf.arrayBuffer());
-    const safeName = `${meta.title} - ${meta.author}`.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 180);
+    const safeName = `${title} - ${author}`.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 180);
     const uploaded = await uploadPdf(drive, {
       name: `${safeName}.pdf`,
       folderId: facultyFolderId,
