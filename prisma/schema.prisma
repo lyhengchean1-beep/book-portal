@@ -80,7 +80,7 @@ model Book {
   hasThumb    Boolean    @default(false)
   // First-page render. Lives in the row, not on disk - Render's free tier has
   // no persistent disk, so a file next to the app is gone on the next deploy.
-  thumbnail   Bytes?     @db.LongBlob
+  thumbnail   Bytes?    
 
   status     BookStatus @default(PENDING)
   failReason String?    @db.Text
