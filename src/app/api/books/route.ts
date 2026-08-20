@@ -36,6 +36,9 @@ export async function GET(req: Request) {
       ...(q ? { OR: [{ title: { contains: q } }, { author: { contains: q } }] } : {}),
     },
     include: { faculty: true },
+    // Cover bytes are served by /api/books/[id]/thumbnail, never inlined
+    // here - a JSON array of every book's raw image data would be enormous.
+    omit: { thumbnail: true },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
@@ -181,6 +184,7 @@ export async function POST(req: Request) {
       where: { id: book.id },
       data: { driveFileId, status: "READY", hasThumb },
       include: { faculty: true },
+      omit: { thumbnail: true },
     });
 
     return NextResponse.json({ book: ready }, { status: 201 });

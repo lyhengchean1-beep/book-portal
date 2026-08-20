@@ -63,6 +63,7 @@ export async function GET(req: Request) {
         : {}),
     },
     include: { faculty: true, uploadedBy: { select: { name: true, email: true } } },
+    omit: { thumbnail: true },
     orderBy: [{ createdAt: "desc" }, { title: "asc" }],
   });
 

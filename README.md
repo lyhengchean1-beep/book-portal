@@ -85,7 +85,6 @@ Compose, so on XAMPP you set two lines:
 
 ```
 DATABASE_URL=mysql://portal:your-password@127.0.0.1:3306/bookportal
-DATA_DIR=./data
 ```
 
 **5. Install and start:**
@@ -215,8 +214,9 @@ The cost is that the permission screen appears on every sign-in.
 **Only the Drive file ID is stored.** URLs are derived at render time in
 `src/lib/links.ts`. IDs are permanent; Drive's URL formats are not.
 
-**Thumbnails live on our own disk**, in the `portal_data` volume. Drive returns a
-`thumbnailLink`, but it expires after a few hours and is rate-limited.
+**Thumbnails live in MySQL**, as a BLOB column on the book row. Drive returns a
+`thumbnailLink`, but it expires after a few hours and is rate-limited - and a
+disk file wouldn't survive a redeploy on a host with no persistent disk.
 
 **The PDF check is on the file header.** A reported MIME type and a `.pdf` suffix
 are both spoofable; `%PDF-` in the first five bytes is not.

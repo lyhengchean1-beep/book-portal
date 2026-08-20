@@ -45,11 +45,9 @@ services:
       # is what Next.js listens on inside the container. 3100 keeps this clear
       # of anything already using 3000 on the host.
       - "${HOST_PORT:-3100}:3000"
-    volumes:
-      # First-page thumbnails. Nothing else needs mounting - Drive access is
-      # granted by each user at sign-in, so there are no key files to manage.
-      - data:/app/data
+    # Nothing needs mounting on the app container - thumbnails live in MySQL
+    # alongside the catalogue, and Drive access is granted by each user at
+    # sign-in, so there are no key files to manage either.
 
 volumes:
   mysqldata:
-  data:

@@ -24,9 +24,6 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN npx prisma generate && npm run build
 
-# Thumbnails live here. Mount a volume so they survive a rebuild.
-RUN mkdir -p /app/data/thumbnails
-
 EXPOSE 3000
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
