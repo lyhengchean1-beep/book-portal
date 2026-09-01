@@ -80,8 +80,23 @@ model Book {
   hasThumb    Boolean    @default(false)
   // First-page render. Lives in the row, not on disk - Render's free tier has
   // no persistent disk, so a file next to the app is gone on the next deploy.
+<<<<<<< Updated upstream
   thumbnail   Bytes?    
 
+=======
+  thumbnail   Bytes?     @db.LongBlob
+
+  // Filename numbering: "12.Sok Pisey.pdf" instead of a title-based name.
+  // facultyFolderId is the Drive folder this book was filed into - the same
+  // faculty gets a different one each time the active year folder changes
+  // (Storage page), so scoping the count to the folder rather than just the
+  // faculty means the numbering starts over for each new year. Both are
+  // null on books uploaded before this existed; they keep their original
+  // title-based filename rather than being renumbered retroactively.
+  facultyFolderId String? @db.VarChar(64)
+  sequenceNumber  Int?
+
+>>>>>>> Stashed changes
   status     BookStatus @default(PENDING)
   failReason String?    @db.Text
 
@@ -93,6 +108,7 @@ model Book {
 
   @@index([facultyId, status, createdAt])
   @@index([title])
+  @@unique([facultyFolderId, sequenceNumber])
 }
 
 /// Caches "which folder holds this faculty's books inside this year folder".
