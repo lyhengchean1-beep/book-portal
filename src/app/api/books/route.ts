@@ -161,11 +161,6 @@ export async function POST(req: Request) {
       folderName: faculty.driveFolder ?? faculty.code,
     });
 
-<<<<<<< Updated upstream
-    // 4. Upload the PDF into that folder.
-    const buffer = Buffer.from(await pdf.arrayBuffer());
-    const safeName = `${title} - ${author}`.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 180);
-=======
     // 3.5. Claim this book's number within that folder. Scoped to the
     // folder rather than just the faculty, so switching the active year on
     // the Storage page starts each faculty back at 1. A simultaneous
@@ -182,7 +177,6 @@ export async function POST(req: Request) {
     // 4. Upload the PDF into that folder.
     const buffer = Buffer.from(await pdf.arrayBuffer());
     const safeAuthor = author.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 180);
->>>>>>> Stashed changes
     const uploaded = await uploadPdf(drive, {
       name: `${sequenceNumber}.${safeAuthor}.pdf`,
       folderId: facultyFolderId,

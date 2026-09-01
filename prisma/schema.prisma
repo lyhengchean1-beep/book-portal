@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -80,10 +80,6 @@ model Book {
   hasThumb    Boolean    @default(false)
   // First-page render. Lives in the row, not on disk - Render's free tier has
   // no persistent disk, so a file next to the app is gone on the next deploy.
-<<<<<<< Updated upstream
-  thumbnail   Bytes?    
-
-=======
   thumbnail   Bytes?     @db.LongBlob
 
   // Filename numbering: "12.Sok Pisey.pdf" instead of a title-based name.
@@ -96,7 +92,6 @@ model Book {
   facultyFolderId String? @db.VarChar(64)
   sequenceNumber  Int?
 
->>>>>>> Stashed changes
   status     BookStatus @default(PENDING)
   failReason String?    @db.Text
 

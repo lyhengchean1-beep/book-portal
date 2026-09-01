@@ -217,8 +217,6 @@ The cost is that the permission screen appears on every sign-in.
 **Thumbnails live in MySQL**, as a BLOB column on the book row. Drive returns a
 `thumbnailLink`, but it expires after a few hours and is rate-limited - and a
 disk file wouldn't survive a redeploy on a host with no persistent disk.
-<<<<<<< Updated upstream
-=======
 
 **Filenames are numbered per faculty, not title-based.** A book becomes
 `3.Sok Pisey.pdf` inside its faculty's Drive folder, where the number is
@@ -228,7 +226,6 @@ year folder on the Storage page starts each faculty back at 1 rather than
 continuing a lifetime count. Books uploaded before this existed have
 `sequenceNumber: null` and keep their original title-based filename; nothing
 renumbers them retroactively.
->>>>>>> Stashed changes
 
 **The PDF check is on the file header.** A reported MIME type and a `.pdf` suffix
 are both spoofable; `%PDF-` in the first five bytes is not.
