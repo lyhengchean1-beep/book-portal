@@ -4,13 +4,15 @@ import { prisma } from "@/lib/prisma";
 import { bookMetadataSchema, validatePdf } from "@/lib/pdf";
 import { saveThumbnail, deleteThumbnail } from "@/lib/storage";
 import {
-  getUserDrive,
-  uploadPdf,
+  getStorageDrive,
+  activeYearFolder,
   ensureFacultyFolder,
+  uploadPdf,
   shareAnyoneReader,
   restrictDownload,
   deleteFile,
   DriveAuthError,
+  DriveConfigError,
 } from "@/lib/drive";
 
 export const runtime = "nodejs";
@@ -31,13 +33,12 @@ export async function GET(req: Request) {
       ...(facultyId ? { facultyId } : {}),
       // MySQL's default collation is case-insensitive, so `contains` needs no
       // mode flag - and Prisma rejects `mode` on MySQL anyway.
-      ...(q
-        ? {
-            OR: [{ title: { contains: q } }, { author: { contains: q } }],
-          }
-        : {}),
+      ...(q ? { OR: [{ title: { contains: q } }, { author: { contains: q } }] } : {}),
     },
     include: { faculty: true },
+    // Cover bytes are served by /api/books/[id]/thumbnail, never inlined
+    // here - a JSON array of every book's raw image data would be enormous.
+    omit: { thumbnail: true },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
@@ -48,9 +49,9 @@ export async function GET(req: Request) {
 /**
  * POST /api/books - multipart form: file + metadata + thumbnail data URL.
  *
- * The file goes into the uploader's own Drive folder, using the Drive
- * permission they granted at sign-in. The database row is written first as
- * PENDING so a failed upload can never leave an untracked file behind.
+ * The file goes into the shared library Drive, under
+ * <root> / <year> / <faculty>. The database row is written first as PENDING, so
+ * a failed upload can never leave an untracked file behind.
  */
 export async function POST(req: Request) {
   const session = await auth();
@@ -59,17 +60,6 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: "Your account can read the library but not add to it. Ask an admin for upload access." },
       { status: 403 },
-    );
-  }
-
-  const uploader = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { folderId: true },
-  });
-  if (!uploader?.folderId) {
-    return NextResponse.json(
-      { error: "Choose a Drive folder before adding books.", needsStorage: true },
-      { status: 409 },
     );
   }
 
@@ -93,19 +83,52 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const meta = parsed.data;
 
-  const faculty = await prisma.faculty.findUnique({ where: { id: meta.facultyId } });
+  // Trimmed once here and used for both the duplicate check and the row, so a
+  // stray trailing space can never make the same book look like a new one.
+  const title = parsed.data.title.trim();
+  const author = parsed.data.author.trim();
+  const { facultyId, pageCount } = parsed.data;
+
+  /**
+   * A thesis is identified well enough by its title and its author, so the pair
+   * is treated as unique. Enforced here rather than by a database index because
+   * a retry after a failed upload must still be allowed: only READY rows count,
+   * and the PENDING and FAILED rows left by earlier attempts are ignored.
+   *
+   * The comparison is case-insensitive for free - that is MySQL's default
+   * collation - so "SOTH CHANNAVY" will not slip past "Soth Channavy".
+   */
+  const duplicate = await prisma.book.findFirst({
+    where: { status: "READY", title, author },
+    select: { id: true, title: true, author: true },
+  });
+  if (duplicate) {
+    return NextResponse.json(
+      {
+        error: "This book is already in the library.",
+        detail: `${duplicate.title} — ${duplicate.author}`,
+        duplicateId: duplicate.id,
+      },
+      { status: 409 },
+    );
+  }
+
+  const faculty = await prisma.faculty.findUnique({ where: { id: facultyId } });
   if (!faculty) {
     return NextResponse.json({ error: "That faculty no longer exists." }, { status: 400 });
   }
 
   let drive;
+  let year;
   try {
-    drive = await getUserDrive(session.user.id);
+    drive = await getStorageDrive();
+    year = await activeYearFolder(drive);
   } catch (err) {
-    if (err instanceof DriveAuthError) {
-      return NextResponse.json({ error: err.message }, { status: 403 });
+    if (err instanceof DriveAuthError || err instanceof DriveConfigError) {
+      // 409 rather than 403: nothing is wrong with this person's account, the
+      // installation is not finished.
+      return NextResponse.json({ error: err.message }, { status: 409 });
     }
     throw err;
   }
@@ -113,11 +136,11 @@ export async function POST(req: Request) {
   // 1. Reserve the row.
   const book = await prisma.book.create({
     data: {
-      title: meta.title,
-      author: meta.author,
-      facultyId: meta.facultyId,
+      title,
+      author,
+      facultyId,
       sizeBytes: pdf.size,
-      pageCount: meta.pageCount ?? null,
+      pageCount: pageCount ?? null,
       uploadedById: session.user.id,
       status: "PENDING",
     },
@@ -131,19 +154,31 @@ export async function POST(req: Request) {
     // 2. Store the first-page thumbnail we rendered in the browser.
     if (hasThumb) await saveThumbnail(book.id, thumb as string);
 
-    // 3. File it under the faculty, creating that subfolder on first use.
+    // 3. Find the faculty folder inside this year, creating it on first use.
     const facultyFolderId = await ensureFacultyFolder(drive, {
-      userId: session.user.id,
-      parentId: uploader.folderId,
+      parentId: year.id,
       facultyId: faculty.id,
-      facultyName: faculty.name,
+      folderName: faculty.driveFolder ?? faculty.code,
     });
 
-    // 4. Upload the PDF into that subfolder.
+    // 3.5. Claim this book's number within that folder. Scoped to the
+    // folder rather than just the faculty, so switching the active year on
+    // the Storage page starts each faculty back at 1. A simultaneous
+    // upload to the same faculty could in principle race here; the unique
+    // constraint on (facultyFolderId, sequenceNumber) turns that into a
+    // clear failure this route already knows how to roll back, rather
+    // than two files silently claiming the same number.
+    const sequenceNumber = (await prisma.book.count({ where: { facultyFolderId } })) + 1;
+    await prisma.book.update({
+      where: { id: book.id },
+      data: { facultyFolderId, sequenceNumber },
+    });
+
+    // 4. Upload the PDF into that folder.
     const buffer = Buffer.from(await pdf.arrayBuffer());
-    const safeName = `${meta.title} - ${meta.author}`.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 180);
+    const safeAuthor = author.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 180);
     const uploaded = await uploadPdf(drive, {
-      name: `${safeName}.pdf`,
+      name: `${sequenceNumber}.${safeAuthor}.pdf`,
       folderId: facultyFolderId,
       body: buffer,
     });
@@ -162,6 +197,7 @@ export async function POST(req: Request) {
       where: { id: book.id },
       data: { driveFileId, status: "READY", hasThumb },
       include: { faculty: true },
+      omit: { thumbnail: true },
     });
 
     return NextResponse.json({ book: ready }, { status: 201 });
@@ -177,9 +213,9 @@ export async function POST(req: Request) {
     console.error("[upload] failed", err);
     const raw = String(err);
     const message = raw.includes("storageQuotaExceeded")
-      ? "Your Google Drive is full. Free up space, or choose a folder on a Shared Drive instead."
+      ? "The library Google Drive is full. An admin needs to free up space or move the library to a Shared Drive."
       : raw.includes("notFound")
-        ? "That folder no longer exists in your Drive. Pick a new one under Storage."
+        ? "The library folder is missing from Drive. An admin should check the year folder under Storage."
         : "The upload did not finish. Nothing was saved. Try again.";
     return NextResponse.json({ error: message }, { status: 502 });
   }

@@ -35,6 +35,7 @@ export default async function CataloguePage({
           : {}),
       },
       include: { faculty: true },
+      omit: { thumbnail: true },
       orderBy: { createdAt: "desc" },
       take: 120,
     }),

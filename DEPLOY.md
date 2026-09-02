@@ -185,7 +185,6 @@ ALLOWED_EMAIL_DOMAINS=rua.edu.kh
 BOOTSTRAP_UPLOADER_EMAILS=<your email>
 SEED_ADMIN_EMAIL=<your email>
 
-DATA_DIR=/app/data
 MAX_UPLOAD_MB=50
 BLOCK_DOWNLOADS=false
 ```
@@ -298,15 +297,12 @@ themselves. `.env` is untracked and survives the pull.
 
 ## Backing up
 
-The books live in Google Drive, so what is on this VM is the catalogue and the
-cover thumbnails. Both are small:
+The books live in Google Drive, so what is on this VM is the catalogue - and
+the cover thumbnails now live inside it too, so one dump covers both:
 
 ```bash
 docker compose exec mysql mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" bookportal \
   | gzip > ~/bookportal-$(date +%F).sql.gz
-
-docker run --rm -v book-portal_data:/data -v "$PWD":/out alpine \
-  tar czf /out/thumbnails-$(date +%F).tar.gz -C /data .
 ```
 
 An ESXi snapshot before each `git pull` is the cheaper habit, as long as you

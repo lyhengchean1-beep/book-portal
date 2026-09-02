@@ -7,17 +7,21 @@ import { usePathname } from "next/navigation";
  * Highlights the section you are in. Split out of Nav because knowing the
  * current path needs the client, while the session lookup needs the server.
  */
-export default function NavLinks({ canUpload }: { canUpload: boolean }) {
+export default function NavLinks({
+  canUpload,
+  canAdmin,
+}: {
+  canUpload: boolean;
+  canAdmin: boolean;
+}) {
   const pathname = usePathname();
 
   const links = [
     { href: "/books", label: "Catalogue" },
-    ...(canUpload
-      ? [
-          { href: "/upload", label: "Add a book" },
-          { href: "/storage", label: "Storage" },
-        ]
-      : []),
+    ...(canUpload ? [{ href: "/upload", label: "Add a book" }] : []),
+    // Storage sets the year folder for the whole library, so it is an admin
+    // screen now rather than something every uploader has to visit first.
+    ...(canAdmin ? [{ href: "/storage", label: "Storage" }] : []),
   ];
 
   return (

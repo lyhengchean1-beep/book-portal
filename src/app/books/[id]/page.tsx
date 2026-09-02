@@ -29,6 +29,7 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
   const book = await prisma.book.findUnique({
     where: { id },
     include: { faculty: true, uploadedBy: { select: { name: true, email: true } } },
+    omit: { thumbnail: true },
   });
 
   if (!book || book.status !== "READY" || !book.driveFileId) notFound();

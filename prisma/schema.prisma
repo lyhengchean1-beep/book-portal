@@ -10,7 +10,7 @@ datasource db {
 enum Role {
   VIEWER   // can browse and read
   UPLOADER // can add books
-  ADMIN    // can add and remove books
+  ADMIN    // can add, remove, and choose the active year folder
 }
 
 enum BookStatus {
@@ -28,25 +28,34 @@ model User {
   role      Role     @default(VIEWER)
   createdAt DateTime @default(now())
 
-  // Granted at sign-in, when the user approves Drive access. Used to upload on
-  // their behalf later, when there is no live session to borrow a token from.
+  // Granted at sign-in. Only the library Drive account's token is ever used to
+  // read or write files - see DRIVE_OWNER_EMAIL. Everyone else's is stored so
+  // that ownership of the library can be moved to another account by changing
+  // one environment variable, with no re-consent dance.
   driveRefreshToken String? @db.Text
 
-  // Where this person's uploads go. driveId is null for My Drive, or the ID of
-  // a Shared Drive. Both names are cached so the UI can show the choice back
-  // without another Drive round trip.
+  // Left over from the per-user destination the portal used to have. Nothing
+  // reads them now. Kept so that `prisma db push` does not drop columns on an
+  // existing database; delete the four lines once you are sure.
   driveId    String?
   driveName  String?
   folderId   String?
   folderName String?
 
-  books     Book[]
+  books Book[]
 }
 
 model Faculty {
-  id    String @id @default(cuid())
-  code  String @unique @db.VarChar(8) // shown on the record card, e.g. AGR
-  name  String @unique @db.VarChar(191)
+  id   String @id @default(cuid())
+  code String @unique @db.VarChar(8)  // shown on the record card, e.g. AGR
+  name String @unique @db.VarChar(191)
+
+  /// Name of this faculty's folder inside the year folder on Drive. Set it
+  /// when the folder that already exists does not match `code` - the portal
+  /// files into an existing folder rather than creating a second one beside
+  /// it. Falls back to `code` when null.
+  driveFolder String? @db.VarChar(64)
+
   books Book[]
 }
 
@@ -60,8 +69,8 @@ model Book {
   isbn        String?    @db.VarChar(20)
   description String?    @db.Text
 
-  facultyId   String
-  faculty     Faculty    @relation(fields: [facultyId], references: [id])
+  facultyId String
+  faculty   Faculty @relation(fields: [facultyId], references: [id])
 
   // Store the Drive file ID, never the URL. IDs are permanent, URLs are not.
   driveFileId String?    @unique
@@ -69,37 +78,59 @@ model Book {
   sizeBytes   Int
   pageCount   Int?
   hasThumb    Boolean    @default(false)
+  // First-page render. Lives in the row, not on disk - Render's free tier has
+  // no persistent disk, so a file next to the app is gone on the next deploy.
+  thumbnail   Bytes?     @db.LongBlob
 
-  status      BookStatus @default(PENDING)
-  failReason  String?    @db.Text
+  // Filename numbering: "12.Sok Pisey.pdf" instead of a title-based name.
+  // facultyFolderId is the Drive folder this book was filed into - the same
+  // faculty gets a different one each time the active year folder changes
+  // (Storage page), so scoping the count to the folder rather than just the
+  // faculty means the numbering starts over for each new year. Both are
+  // null on books uploaded before this existed; they keep their original
+  // title-based filename rather than being renumbered retroactively.
+  facultyFolderId String? @db.VarChar(64)
+  sequenceNumber  Int?
+
+  status     BookStatus @default(PENDING)
+  failReason String?    @db.Text
 
   uploadedById String
-  uploadedBy   User      @relation(fields: [uploadedById], references: [id])
+  uploadedBy   User   @relation(fields: [uploadedById], references: [id])
 
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([facultyId, status, createdAt])
   @@index([title])
+  @@unique([facultyFolderId, sequenceNumber])
 }
 
-/// Caches "which subfolder holds this faculty's books, inside this person's
-/// main folder". Purely a lookup cache - if a row goes stale the folder is
-/// found or recreated on the next upload, so no relations or cascades needed.
-/// Caches "which subfolder holds this faculty's books, inside this person's
-/// main folder". Purely a lookup cache - if a row goes stale the folder is
-/// found or recreated on the next upload, so no relations or cascades needed.
+/// Caches "which folder holds this faculty's books inside this year folder".
+/// Purely a lookup cache - a stale row is detected and rebuilt on the next
+/// upload, so there are no relations or cascades to maintain.
+///
+/// This used to be keyed by uploader as well. It no longer is: there is one
+/// library Drive, so the same faculty in the same year is the same folder for
+/// everybody.
 model FacultyFolder {
   id        String   @id @default(cuid())
-  // Explicit lengths: three VARCHAR(191) utf8mb4 columns in one unique index
-  // come to 2292 bytes, over MySQL's 1000-byte key limit. cuids are 25 chars
-  // and Drive IDs around 33, so 64 is comfortable and 3 x 64 x 4 = 768 fits.
-  userId    String   @db.VarChar(64)
+  // Explicit lengths: VARCHAR(191) utf8mb4 columns in a composite unique index
+  // blow past MySQL's key limit. cuids are 25 chars and Drive IDs about 33.
   facultyId String   @db.VarChar(64)
-  parentId  String   @db.VarChar(64) // the main folder the subfolder lives in
+  parentId  String   @db.VarChar(64) // the year folder this one lives in
   folderId  String   @db.VarChar(64)
   createdAt DateTime @default(now())
 
-  @@unique([userId, facultyId, parentId])
-  @@index([userId])
+  @@unique([facultyId, parentId])
+}
+
+/// Small key/value store for settings that belong to the installation rather
+/// than to any one person - currently just which year folder is being filed
+/// into. A table rather than an environment variable because an admin changes
+/// it from the Storage page, without a redeploy.
+model Setting {
+  key       String   @id @db.VarChar(64)
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
 }

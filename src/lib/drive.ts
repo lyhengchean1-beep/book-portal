@@ -1,104 +1,156 @@
 import { Readable } from "node:stream";
 import { google, type drive_v3 } from "googleapis";
 import { prisma } from "@/lib/prisma";
+import { getSetting, setSetting, KEYS } from "@/lib/settings";
 
 /**
- * Google Drive, acting as the signed-in person.
+ * One Drive for the whole library.
  *
- * There is no service account and no Shared Drive requirement. Drive access is
- * granted by the user when they sign in, and each uploader picks their own
- * destination folder, so the only thing to configure is one OAuth client.
+ * Every file is written by a single Google account - the one named in
+ * DRIVE_OWNER_EMAIL - into a fixed folder tree:
+ *
+ *     <DRIVE_ROOT_FOLDER_ID>  e.g. សារណា
+ *       └── <year>            chosen once by an admin, or created on demand
+ *             └── <faculty>   created the first time a book is filed there
+ *
+ * Nobody picks a destination. Signing in does not need to give the portal
+ * anything, and a new machine only needs the environment variables copied
+ * across: no folder to choose again, no per-person setup.
  */
 
 export class DriveAuthError extends Error {}
+export class DriveConfigError extends Error {}
 
-/** Builds a Drive client for a user from their stored refresh token. */
-export async function getUserDrive(userId: string): Promise<drive_v3.Drive> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
+export type DriveFolder = { id: string; name: string };
+
+const OWNER_EMAIL = (process.env.DRIVE_OWNER_EMAIL ?? "").trim().toLowerCase();
+const OWNER_TOKEN = (process.env.DRIVE_OWNER_REFRESH_TOKEN ?? "").trim();
+const ROOT_ID = (process.env.DRIVE_ROOT_FOLDER_ID ?? "").trim();
+
+/** Display name for the root folder. Cosmetic - the ID is what files go into. */
+export const ROOT_FOLDER_NAME = (process.env.DRIVE_ROOT_FOLDER_NAME ?? "").trim() || "Library";
+
+export function rootFolderId(): string {
+  if (!ROOT_ID) {
+    throw new DriveConfigError(
+      "DRIVE_ROOT_FOLDER_ID is not set. Open the main folder in Drive and copy the ID from the address bar.",
+    );
+  }
+  return ROOT_ID;
+}
+
+/**
+ * The refresh token the portal uploads with.
+ *
+ * Two ways to supply it. DRIVE_OWNER_REFRESH_TOKEN is fully portable - copy
+ * the .env to a new machine and it works with nobody signing in. Otherwise the
+ * token is read from the row of the account named in DRIVE_OWNER_EMAIL, which
+ * means that account signs in to the portal once per installation.
+ */
+async function ownerRefreshToken(): Promise<string> {
+  if (OWNER_TOKEN) return OWNER_TOKEN;
+
+  if (!OWNER_EMAIL) {
+    throw new DriveConfigError(
+      "Set DRIVE_OWNER_EMAIL (or DRIVE_OWNER_REFRESH_TOKEN) so the portal knows which Drive holds the library.",
+    );
+  }
+
+  const owner = await prisma.user.findUnique({
+    where: { email: OWNER_EMAIL },
     select: { driveRefreshToken: true },
   });
 
-  if (!user?.driveRefreshToken) {
+  if (!owner) {
     throw new DriveAuthError(
-      "This account has not granted Drive access. Sign out, sign in again, and approve the Google permission screen.",
+      `${OWNER_EMAIL} has not signed in to the portal yet. Sign in once with that account to connect the library Drive.`,
     );
   }
+  if (!owner.driveRefreshToken) {
+    throw new DriveAuthError(
+      `${OWNER_EMAIL} signed in without approving Drive access. Sign out, sign in again, and accept the Google permission screen.`,
+    );
+  }
+
+  return owner.driveRefreshToken;
+}
+
+/** A Drive client acting as the library account, whoever is signed in. */
+export async function getStorageDrive(): Promise<drive_v3.Drive> {
+  const refresh_token = await ownerRefreshToken();
 
   const oauth2 = new google.auth.OAuth2(
     process.env.AUTH_GOOGLE_ID,
     process.env.AUTH_GOOGLE_SECRET,
   );
-  // googleapis exchanges this for a fresh access token on every call that
-  // needs one, so nothing expires an hour after sign-in.
-  oauth2.setCredentials({ refresh_token: user.driveRefreshToken });
+  // googleapis exchanges this for a fresh access token on every call that needs
+  // one, so nothing expires an hour after sign-in.
+  oauth2.setCredentials({ refresh_token });
 
   return google.drive({ version: "v3", auth: oauth2 });
 }
 
-// --- picking a destination --------------------------------------------------
+// --- folders ----------------------------------------------------------------
 
-export type DriveLocation = { id: string | null; name: string; shared: boolean };
-export type DriveFolder = { id: string; name: string };
-
-/** My Drive, plus any Shared Drives this person can write to. */
-export async function listLocations(drive: drive_v3.Drive): Promise<DriveLocation[]> {
-  const locations: DriveLocation[] = [{ id: null, name: "My Drive", shared: false }];
-
-  try {
-    const res = await drive.drives.list({ pageSize: 100, fields: "drives(id,name)" });
-    for (const d of res.data.drives ?? []) {
-      if (d.id) locations.push({ id: d.id, name: d.name ?? "Untitled", shared: true });
-    }
-  } catch {
-    // Accounts with no Shared Drive access get an error here. My Drive alone
-    // is a perfectly good answer, so this is not worth failing the request for.
-  }
-
-  return locations;
+/** Escapes a value for a Drive `q` string literal. */
+function q(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-/** Top-level folders inside My Drive or a Shared Drive. */
-export async function listFolders(
+/** Immediate subfolders of a folder, newest name first. */
+export async function listSubfolders(
   drive: drive_v3.Drive,
-  driveId: string | null,
+  parentId: string,
 ): Promise<DriveFolder[]> {
-  const params: drive_v3.Params$Resource$Files$List = {
-    q:
-      "mimeType = 'application/vnd.google-apps.folder' and trashed = false and " +
-      `'${driveId ?? "root"}' in parents`,
+  const res = await drive.files.list({
+    q: [
+      "mimeType = 'application/vnd.google-apps.folder'",
+      "trashed = false",
+      `'${q(parentId)}' in parents`,
+    ].join(" and "),
     fields: "files(id,name)",
-    orderBy: "name",
     pageSize: 200,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
-  };
+  });
 
-  if (driveId) {
-    params.corpora = "drive";
-    params.driveId = driveId;
-  }
-
-  const res = await drive.files.list(params);
   return (res.data.files ?? [])
     .filter((f): f is { id: string; name: string } => Boolean(f.id))
-    .map((f) => ({ id: f.id, name: f.name ?? "Untitled" }));
+    .map((f) => ({ id: f.id, name: f.name ?? "Untitled" }))
+    .sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }));
 }
 
-/**
- * Creates a folder. `parentId` is a folder ID, a Shared Drive ID (which acts as
- * that drive's root), or null for the root of My Drive.
- */
+async function findFolderByName(
+  drive: drive_v3.Drive,
+  parentId: string,
+  name: string,
+): Promise<string | null> {
+  const res = await drive.files.list({
+    q: [
+      "mimeType = 'application/vnd.google-apps.folder'",
+      "trashed = false",
+      `'${q(parentId)}' in parents`,
+      `name = '${q(name)}'`,
+    ].join(" and "),
+    fields: "files(id)",
+    pageSize: 1,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+
+  return res.data.files?.[0]?.id ?? null;
+}
+
 export async function createFolder(
   drive: drive_v3.Drive,
-  parentId: string | null,
+  parentId: string,
   name: string,
 ): Promise<DriveFolder> {
   const res = await drive.files.create({
     requestBody: {
       name,
       mimeType: "application/vnd.google-apps.folder",
-      parents: [parentId ?? "root"],
+      parents: [parentId],
     },
     fields: "id, name",
     supportsAllDrives: true,
@@ -106,6 +158,102 @@ export async function createFolder(
 
   if (!res.data.id) throw new Error("Drive did not return a folder ID.");
   return { id: res.data.id, name: res.data.name ?? name };
+}
+
+/** Find a folder by name under a parent, or make it. */
+export async function ensureFolder(
+  drive: drive_v3.Drive,
+  parentId: string,
+  name: string,
+): Promise<DriveFolder> {
+  const existing = await findFolderByName(drive, parentId, name);
+  return existing ? { id: existing, name } : createFolder(drive, parentId, name);
+}
+
+// --- the year folder --------------------------------------------------------
+
+export async function setActiveYearFolder(folder: DriveFolder): Promise<void> {
+  await setSetting(KEYS.yearFolderId, folder.id);
+  await setSetting(KEYS.yearFolderName, folder.name);
+}
+
+/** The year folder shown in the UI, without spending a Drive call on it. */
+export async function activeYearFolderName(): Promise<string> {
+  return (await getSetting(KEYS.yearFolderName)) ?? String(new Date().getFullYear());
+}
+
+/**
+ * The folder every upload is filed under, one level below the root.
+ *
+ * An admin chooses it on the Storage page. Until they do - and if the chosen
+ * folder is later deleted - the portal falls back to a folder named for the
+ * current calendar year, creating it if it is not there. That is what keeps
+ * this working year after year with nobody touching anything in January.
+ */
+export async function activeYearFolder(drive: drive_v3.Drive): Promise<DriveFolder> {
+  const chosen = await getSetting(KEYS.yearFolderId);
+
+  if (chosen) {
+    try {
+      const res = await drive.files.get({
+        fileId: chosen,
+        fields: "id, name, trashed",
+        supportsAllDrives: true,
+      });
+      if (res.data.id && !res.data.trashed) {
+        return { id: res.data.id, name: res.data.name ?? chosen };
+      }
+    } catch {
+      // Deleted in Drive since it was chosen. Fall through and rebuild.
+    }
+  }
+
+  const folder = await ensureFolder(drive, rootFolderId(), String(new Date().getFullYear()));
+  await setActiveYearFolder(folder);
+  return folder;
+}
+
+// --- the faculty folder -----------------------------------------------------
+
+/**
+ * The faculty's folder inside the year folder, created on first use.
+ *
+ * `folderName` is Faculty.driveFolder if set, otherwise Faculty.code - so an
+ * existing folder whose name does not match the code is filed into rather than
+ * duplicated. The mapping is cached; a cached folder that has since been
+ * deleted is detected and replaced rather than failing the upload.
+ */
+export async function ensureFacultyFolder(
+  drive: drive_v3.Drive,
+  opts: { parentId: string; facultyId: string; folderName: string },
+): Promise<string> {
+  const { parentId, facultyId, folderName } = opts;
+
+  const cached = await prisma.facultyFolder.findUnique({
+    where: { facultyId_parentId: { facultyId, parentId } },
+  });
+
+  if (cached) {
+    try {
+      const check = await drive.files.get({
+        fileId: cached.folderId,
+        fields: "id, trashed",
+        supportsAllDrives: true,
+      });
+      if (!check.data.trashed) return cached.folderId;
+    } catch {
+      // Gone from Drive. Fall through and re-resolve.
+    }
+    await prisma.facultyFolder.delete({ where: { id: cached.id } }).catch(() => {});
+  }
+
+  const folder = await ensureFolder(drive, parentId, folderName);
+
+  await prisma.facultyFolder
+    .create({ data: { facultyId, parentId, folderId: folder.id } })
+    .catch(() => {}); // a concurrent upload may have written it first
+
+  return folder.id;
 }
 
 // --- storing a book ---------------------------------------------------------
@@ -159,76 +307,4 @@ export async function restrictDownload(drive: drive_v3.Drive, fileId: string) {
 /** Used to roll back an upload when the database write fails afterwards. */
 export async function deleteFile(drive: drive_v3.Drive, fileId: string) {
   await drive.files.delete({ fileId, supportsAllDrives: true });
-}
-
-// --- faculty subfolders -----------------------------------------------------
-
-/** Escapes a value for a Drive `q` string literal. */
-function q(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-}
-
-/** Finds a folder by exact name under a parent, or null. */
-async function findFolderByName(
-  drive: drive_v3.Drive,
-  parentId: string,
-  name: string,
-): Promise<string | null> {
-  const res = await drive.files.list({
-    q: [
-      "mimeType = 'application/vnd.google-apps.folder'",
-      "trashed = false",
-      `'${q(parentId)}' in parents`,
-      `name = '${q(name)}'`,
-    ].join(" and "),
-    fields: "files(id)",
-    pageSize: 1,
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true,
-  });
-
-  return res.data.files?.[0]?.id ?? null;
-}
-
-/**
- * Returns the subfolder for a faculty inside the uploader's main folder,
- * creating it the first time a book is filed under that faculty.
- *
- * The mapping is cached in FacultyFolder so the common path is one database
- * read rather than two Drive calls. A cached folder that has been deleted or
- * trashed in Drive is detected and replaced rather than failing the upload.
- */
-export async function ensureFacultyFolder(
-  drive: drive_v3.Drive,
-  opts: { userId: string; parentId: string; facultyId: string; facultyName: string },
-): Promise<string> {
-  const { userId, parentId, facultyId, facultyName } = opts;
-
-  const cached = await prisma.facultyFolder.findUnique({
-    where: { userId_facultyId_parentId: { userId, facultyId, parentId } },
-  });
-
-  if (cached) {
-    try {
-      const check = await drive.files.get({
-        fileId: cached.folderId,
-        fields: "id, trashed",
-        supportsAllDrives: true,
-      });
-      if (!check.data.trashed) return cached.folderId;
-    } catch {
-      // Deleted in Drive since we cached it. Fall through and re-resolve.
-    }
-    await prisma.facultyFolder.delete({ where: { id: cached.id } }).catch(() => {});
-  }
-
-  const folderId =
-    (await findFolderByName(drive, parentId, facultyName)) ??
-    (await createFolder(drive, parentId, facultyName)).id;
-
-  await prisma.facultyFolder
-    .create({ data: { userId, facultyId, parentId, folderId } })
-    .catch(() => {}); // a concurrent upload may have written it first
-
-  return folderId;
 }
