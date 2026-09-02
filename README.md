@@ -1,268 +1,315 @@
-# Book Portal
+# Book Portal — Project Context
 
-Sign in with Google, pick a folder in your Drive, upload a book PDF. The portal
-opens the link for viewing, so anyone can read it without a Google account.
-Browse the library by faculty.
-
-```
-Next.js 15 (App Router)  UI + API routes
-Auth.js v5               Google sign-in, Drive permission, domain restricted
-MySQL 8 + Prisma         catalogue metadata
-Google Drive API         the PDFs themselves, in the uploader's own Drive
-pdf.js                   first-page preview, rendered in the browser
-Tailwind CSS v4          styling
-```
-
-No service account, no Shared Drive requirement, no key file. Drive access is
-granted by each person when they sign in.
+Paste this whole document as your first message before asking an AI to change
+anything in this codebase. It exists because an assistant once edited this
+project without this context and deleted the reverse proxy entirely, causing
+several hours of outage. Read it fully before touching any file.
 
 ---
 
-## Setup
+## 0. The one rule above all others
 
-### 1. One Google OAuth client
-
-At <https://console.cloud.google.com>:
-
-1. Create a project.
-2. **APIs & Services → Library → Google Drive API → Enable.**
-3. **OAuth consent screen → Internal** if you have Google Workspace, otherwise
-   External. Add the `.../auth/drive` scope.
-4. **Credentials → Create credentials → OAuth client ID → Web application.**
-   Authorised redirect URI:
-   ```
-   http://localhost:3000/api/auth/callback/google
-   ```
-
-Copy the client ID and secret. That is the whole Google setup.
-
-> On an **Internal** consent screen the Drive scope needs no verification review.
-> On **External** it works immediately for accounts you add as test users, but
-> Google requires a review before opening it to everyone.
-
-### 2. Environment
-
-```bash
-cp .env.example .env
-openssl rand -base64 32   # paste into AUTH_SECRET
-```
-
-Fill in `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` and the four `MYSQL_*` values.
-`DATABASE_URL` repeats those MySQL values as a connection string — the host is
-`mysql`, the compose service name, and if the password contains `@ : / ?` it
-must be percent-encoded there (`@` becomes `%40`).
-
-Set `ALLOWED_EMAIL_DOMAINS` to your institution's domain, and put your own
-address in `BOOTSTRAP_UPLOADER_EMAILS` and `SEED_ADMIN_EMAIL` so you can upload
-straight away.
-
-### 3. Run it — pick one
-
-#### A. XAMPP or WAMP
-
-Both ship MySQL and phpMyAdmin, which is everything the portal needs from them.
-Apache and PHP are not involved — this is a Node application and it serves
-itself.
-
-**1. Install Node.js 20 or newer** from nodejs.org. Neither XAMPP nor WAMP
-includes it. Check with `node -v`.
-
-**2. Start MySQL** from the XAMPP Control Panel, or from the WAMP tray icon
-(wait for it to turn green).
-
-**3. Create the database.** Open <http://localhost/phpmyadmin>, go to the SQL
-tab, and run:
-
-```sql
-CREATE DATABASE bookportal CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'portal'@'localhost' IDENTIFIED BY 'your-password';
-GRANT ALL PRIVILEGES ON bookportal.* TO 'portal'@'localhost';
-FLUSH PRIVILEGES;
-```
-
-**4. Point `.env` at it.** The `MYSQL_*` variables are only read by Docker
-Compose, so on XAMPP you set two lines:
-
-```
-DATABASE_URL=mysql://portal:your-password@127.0.0.1:3306/bookportal
-```
-
-**5. Install and start:**
-
-```bash
-npm install
-npm run setup     # generates the client, creates the tables, seeds faculties
-npm run dev
-```
-
-Open <http://localhost:3000>. For a non-development run, use `npm run build`
-then `npm start`.
-
-Four things that catch people out on Windows:
-
-- **XAMPP and WAMP both ship MariaDB** under the "MySQL" label. Prisma's `mysql`
-  provider handles it — nothing to change.
-- **Use `127.0.0.1`, not `localhost`,** in `DATABASE_URL`. On Windows,
-  `localhost` can resolve to `::1` while MySQL listens on IPv4 only.
-- **There is no `openssl`.** Generate `AUTH_SECRET` with:
-  ```bash
-  node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-  ```
-- **If MySQL will not start,** something else holds port 3306 — usually an old
-  MySQL service. Change the port in the control panel and update the port in
-  `DATABASE_URL` to match.
-
-*Optional — serve it on port 80 through Apache.* Uncomment `mod_proxy` and
-`mod_proxy_http` in `httpd.conf`, then add:
-
-```apache
-<VirtualHost *:80>
-  ServerName library.local
-  ProxyPreserveHost On
-  ProxyPass        /  http://127.0.0.1:3000/
-  ProxyPassReverse /  http://127.0.0.1:3000/
-</VirtualHost>
-```
-
-Then set `AUTH_URL=http://library.local` and add
-`http://library.local/api/auth/callback/google` to the redirect URIs in Google
-Cloud. Both, or sign-in breaks.
-
-#### B. Docker
-
-```bash
-docker compose up -d --build
-```
-
-Fill in the four `MYSQL_*` values first; Compose creates the database from them.
-The entrypoint waits for MySQL, pushes the schema, and seeds the faculty list.
+**This document describes architecture and hard-won lessons. It is not a live
+snapshot.** Files drift. As one concrete example: the `Book` model in
+`prisma/schema.prisma` at one point gained a `facultyFolderId` +
+`sequenceNumber` unique constraint that no version of this document ever
+specified — something changed it outside the process that produced this
+context. So: **before editing any file, `cat` or `view` it fresh.** Never
+assume a file matches a description here, in a chat log, or in your own
+memory of "how this usually looks." Confirm, then edit.
 
 ---
 
-Either way: open the portal, sign in, and approve the Google permission screen —
-that is what grants Drive access. You are asked to choose a folder before your
-first upload.
+## 1. What this is
 
-The seed uses `upsert`, so it re-runs safely — deliberately no `.seeded` marker
-file, because that pattern silently stops new faculties from ever appearing
-after the first start.
+**Book Portal** — a digital library for the Royal University of Agriculture
+(RUA), Cambodia. Staff and students sign in with Google, upload a PDF thesis
+or book, the system reads the title and author off the cover automatically,
+files the PDF into the university's shared Google Drive, and adds a catalogue
+entry anyone can browse and read.
+
+This is a production deployment for a real institution, not a prototype.
+
+## 2. Stack
+
+- **Next.js 15** (App Router), TypeScript
+- **Prisma** ORM → **MySQL 8**
+- **Auth.js** (NextAuth v5) with Google OAuth
+- **Google Drive API** for file storage
+- **Gemini API** for reading title/author off a cover image
+- **Docker Compose** — three services: `mysql`, `app`, `caddy`
+- **Caddy** (custom build with `caddy-dns/duckdns` plugin) as reverse proxy + TLS
+- **DuckDNS** for the public hostname
+- Deployed on an **Ubuntu 24.04 VM under VMware ESXi**
 
 ---
 
-## How the flowchart maps onto the code
+## 3. The core architecture — read this before proposing any change
 
-| Flowchart box | Where it lives |
+### 3.1 One Drive account owns every file
+
+There is no per-user Drive integration. One Google account — named in
+`DRIVE_OWNER_EMAIL` — owns every uploaded file, regardless of who is signed in
+when the upload happens. This was a deliberate rewrite from an earlier
+per-uploader design, which produced one catalogue backed by several personal
+Drive quotas and orphaned files when a staff member's account was deleted.
+
+MySQL holds only catalogue metadata and small first-page thumbnails — never
+the PDFs. **Losing the VM costs the catalogue, never the books.**
+
+### 3.2 Folder hierarchy on Drive
+
+```
+<DRIVE_ROOT_FOLDER_ID>      fixed, never changes ("សារណា" — folder ID
+                             1m-FSCDUQUK-L3s5Gt-KayidOQ8AWux4R)
+  └── <year>                 chosen by an admin on /storage, or defaults
+                             to the current calendar year and is created
+                             on demand
+        └── <faculty code>   created on first use; the Faculty.code field
+                             IS the Drive folder name
+              └── book.pdf
+```
+
+Nobody picks a destination during upload. `Faculty.code` must match an
+existing Drive folder name exactly, or use `Faculty.driveFolder` as an
+override — otherwise the portal creates a duplicate folder beside the real
+one. Current codes (confirm against the live seed before trusting this):
+`AGR, ANS, VM, DVM, FOR, FIS, AGE, AERD, AGI, LMA, MS, PHD`. Several were
+renamed in place (`AER→AERD`, `AET→AGE`, `AVM→ANS`) specifically to preserve
+existing books' `facultyId` links — never delete-and-recreate a Faculty row
+to "fix" its code; that strands every book already filed under it.
+
+### 3.3 Roles: VIEWER → UPLOADER → ADMIN
+
+| Role | Can do | Granted by |
+|---|---|---|
+| VIEWER | browse and read | signing in at all |
+| UPLOADER | + add books | `UPLOADER_EMAIL_DOMAINS` match, or `DEFAULT_ROLE=UPLOADER` |
+| ADMIN | + remove books, set the year folder | `SEED_ADMIN_EMAIL`, applied by `npm run db:seed` |
+
+**Roles only ever rise.** An existing VIEWER is raised to whatever the
+current policy grants on their next sign-in; an UPLOADER or ADMIN is never
+auto-lowered, so a manual promotion in the database survives every future
+sign-in.
+
+**The role is baked into the session's JWT at sign-in.** A database change
+(`UPDATE User SET role=...`) has zero effect on an already-active session.
+The affected person must sign out and back in. Do not "fix" a role problem by
+looking for a bug in middleware — check whether they've signed in again
+since the change, first.
+
+### 3.4 Why only one account ever sees Google's warning
+
+Ordinary sign-in requests only `openid email profile` — non-sensitive scopes,
+no unverified-app warning, no user cap, works for any Google account on
+earth. **The Drive scope is never requested at ordinary sign-in.** It is
+requested exactly once, by a dedicated "Connect the library Drive" button on
+`/storage`, using `access_type=offline` + `prompt=consent`, signed in as the
+`DRIVE_OWNER_EMAIL` account specifically. That is the only place in the
+entire app that asks for Drive access, and the only account that ever sees
+Google's warning screen.
+
+If you're asked to "let more people sign in" or "fix the Google warning,"
+check whether the fix accidentally adds the Drive scope to the base sign-in
+flow — that would reintroduce the warning for everyone.
+
+### 3.5 Duplicate detection
+
+Before writing a new `Book` row, the API checks for an existing row with the
+same `title` + `author` (case-insensitive — MySQL's default collation) **but
+only among rows with `status = READY`**. PENDING and FAILED rows are ignored
+deliberately, so a retry after a broken upload is never blocked by its own
+failed attempt.
+
+### 3.6 Upload flow
+
+1. Browser renders page one of the dropped PDF client-side.
+2. Gemini reads title + author off that render (retry + backoff + a lighter
+   fallback model — the primary model returning 503 under load is common
+   enough to plan for, not an edge case).
+3. Duplicate check (3.5). A hit returns 409 with a link to the existing
+   record, not just a refusal.
+4. A `Book` row is reserved as `PENDING`.
+5. The PDF uploads to Drive, into `<root>/<year>/<faculty>` (3.2).
+6. The file is shared as anyone-with-link reader.
+7. The row is updated to `READY`.
+8. A toast confirms success; **the form stays on the page** and clears for
+   the next upload rather than redirecting to the new record — this was a
+   deliberate UX change so uploading a stack of books doesn't require
+   navigating back after each one.
+
+Any failure at steps 5–7 rolls back: the Drive file (if created) is deleted
+and the row is marked `FAILED`. There is never an orphaned Drive file with no
+database row, or a database row silently missing its file.
+
+### 3.7 Session lifetime is short and deliberate
+
+Default 8 hours (`SESSION_HOURS`), rolling (`updateAge` refreshes on
+activity), with `prompt: select_account` forced on every sign-in. This is
+because the portal is used from shared/lab computers — a stock 30-day
+session would mean the next person to sit down is silently signed in as
+whoever used it last. **Do not "simplify" this back to NextAuth's default.**
+Forcing the account chooser matters as much as the short expiry: without it,
+Google silently reuses whichever account is already signed in to that
+browser, making the short session pointless on its own.
+
+---
+
+## 4. File map
+
+| Path | Role |
 |---|---|
-| User opens portal | `src/app/page.tsx` |
-| Sign in with Google | `src/auth.config.ts` — also requests the Drive scope |
-| Backend validates Google token | `src/auth.ts` → `jwt` callback, stores the refresh token |
-| Authorized? | `src/auth.config.ts` → `signIn` callback (domain check) |
-| **Choose a Drive folder** *(new)* | `src/app/storage/page.tsx` |
-| Open dashboard | `src/app/books/page.tsx` |
-| Upload book / details / faculty | `src/components/UploadForm.tsx` |
-| **Render page 1 preview** *(added)* | `src/components/FirstPagePlate.tsx` |
-| Validate PDF | `src/lib/pdf.ts` — magic bytes, not the extension |
-| Upload PDF to Google Drive | `src/lib/drive.ts` → `uploadPdf` |
-| Set view permission | `src/lib/drive.ts` → `shareAnyoneReader` |
-| **Rollback on failure** *(added)* | `POST /api/books` catch block |
-| Save details + file ID | `prisma.book.update` |
-| Faculty filter → query → display | `src/app/books/page.tsx` |
-| Open Drive preview | `src/app/books/[id]/page.tsx` — embedded iframe |
+| `src/auth.config.ts` | Edge-safe half of auth: providers, scopes, session length, domain gate. Imported by middleware — must never import Prisma or anything Node-only. |
+| `src/auth.ts` | Node-only half: the `jwt` callback that upserts `User` rows and decides/raises roles. `canUpload`, `canDelete`, `canAdmin` helpers live here. |
+| `src/lib/drive.ts` | All Drive logic: `rootFolderId`, `activeYearFolder`, `ensureFacultyFolder`, `uploadPdf`, `shareAnyoneReader`, `deleteFile`. The single source of truth for the folder hierarchy in 3.2. |
+| `src/lib/settings.ts` | Tiny key/value helper over the `Setting` table — currently used only to store which year folder is active, so an admin can change it without a redeploy. |
+| `src/lib/extract.ts` | Gemini cover-reading: retry with backoff, falls back to a lighter model, distinguishes "feature switched off" from "model busy" from "hard failure." |
+| `src/app/api/books/route.ts` | `GET` (list/search), `POST` (upload — duplicate check, reserve row, upload, share, commit or roll back). |
+| `src/app/api/books/[id]/route.ts` | `GET` one book; `DELETE` (admin-only) — **hard-deletes** the DB row, the Drive file, and the thumbnail. No undo, no soft-delete. |
+| `src/app/api/drive/years/route.ts` | Admin lists/sets the active year folder. |
+| `src/app/api/extract/route.ts` | HTTP wrapper around `extract.ts`; returns 501 if the feature is off, 503 if every model attempt was busy. |
+| `src/components/UploadForm.tsx` | The upload UI. Stays on page after success (3.6.8), shows toasts, keeps the faculty selection between uploads. |
+| `src/components/UploadToasts.tsx` | Success/error toast stack, auto-dismisses (errors linger longer than confirmations). |
+| `src/components/YearPicker.tsx`, `ConnectDriveButton.tsx` | Admin-only pieces of `/storage`. |
+| `src/components/Nav.tsx`, `NavLinks.tsx` | Role-gated nav — "Add a book" needs UPLOADER, "Storage" needs ADMIN. |
+| `prisma/schema.prisma` | **Read fresh — see §0.** Originally: `User`, `Faculty` (code = Drive folder name), `Book`, `FacultyFolder` (a resolution cache, not a source of truth), `Setting`. |
+| `prisma/seed.ts` | Faculty list with codes matching Drive folder names, in-place renames (never delete-and-recreate), admin promotion by email. |
+| `docker-entrypoint.sh` | Waits for MySQL by polling `prisma db push` itself as the readiness check (no separate `mysqladmin` client needed). **Must include `--accept-data-loss`** — see §6. |
+| `docker-compose.yml` | Three services. **`app` and `mysql` publish no host ports.** Caddy is the only ingress. See §5. |
+| `proxy/Dockerfile` | Custom Caddy build: `caddy:2-builder` + `xcaddy build --with github.com/caddy-dns/duckdns`, then copies the binary into stock `caddy:2`. Compiling this from scratch takes several minutes — normal, not stuck. |
+| `proxy/Caddyfile` | One site block: the DuckDNS hostname, DNS-01 TLS via the `duckdns` plugin, `reverse_proxy app:3000`. |
 
 ---
 
-## Day-to-day
+## 5. Deployment topology
 
-**Upload rights.** Everyone starts as `VIEWER`. After they have signed in once:
-
-```sql
-UPDATE User SET role = 'UPLOADER' WHERE email = 'someone@your-domain';
+```
+Browser (LAN only — see §7 open issue)
+  │  HTTPS
+  ▼
+portal_caddy   — ports 80, 443 published. Only ingress point.
+  │  app:3000 (Compose network only, no host port)
+  ▼
+portal_app     — Next.js, no host port
+  │  mysql:3306 (Compose network only, no host port)
+  ▼
+portal_mysql   — no host port at all
 ```
 
-They must sign out and back in — the role travels in the session token. `ADMIN`
-also allows removing books.
+| Fact | Value |
+|---|---|
+| VM | Ubuntu 24.04, ESXi guest |
+| Static LAN IP | `192.168.6.182` (pinned via DHCP reservation on MAC `00:0c:29:62:45:22`) |
+| Gateway / DNS | `192.168.6.1` / `203.189.128.1`, `203.189.128.2` |
+| Public hostname | `ruaportal.duckdns.org` — **currently resolves to the private LAN IP above**, see §7 |
+| Repo path on VM | `/opt/book-portal` |
+| Repo | `github.com/lyhengchean1-beep/book-portal`, branch `dev` |
+| Deploy key | ed25519, generated **on the VM**, **read-only** on GitHub. The VM can only pull. |
 
-**Faculties.** Edit `prisma/seed.ts`, then
-`docker compose exec app npm run db:seed`.
-
-**Changing your folder.** Storage in the top nav. Existing books stay where they
-are; only new uploads move.
-
-**Turning downloads off.** `BLOCK_DOWNLOADS=true` sets
-`copyRequiresWriterPermission` on newly uploaded files, hiding Drive's download
-and copy buttons. Not DRM, but it stops casual redistribution.
-
-**Public address.** Point your tunnel at port 3000, set `AUTH_URL` to the public
-hostname, and add `https://<hostname>/api/auth/callback/google` to the redirect
-URIs in Google Cloud. Those two must change together — Auth.js validates the
-callback against `AUTH_URL`.
+**Why the deploy key is read-only:** it has no passphrase (an unattended
+`git pull` can't type one), so if the server were ever compromised, a
+write-capable key would let an attacker push malicious commits back to the
+source repo. Read-only removes that path entirely. **Do not enable write
+access on this key** to solve a "can't push from the server" problem — push
+from the Windows development machine instead; the VM pulling only is the
+correct direction of flow, not a limitation to route around.
 
 ---
 
-## Notes on decisions
+## 6. Hard rules — incidents that already happened once
 
-**Books live in the uploader's Drive.** A service account cannot store files at
-all — it has a 0 GB quota, which is why the usual advice starts with arranging a
-Shared Drive. Asking each person for Drive access at sign-in skips that entirely.
-If you would rather keep everything in one place, point everyone at the same
-folder on a Shared Drive from the Storage screen; the code is identical.
+1. **Never remove or restructure the `caddy` service or the `proxy/` folder**
+   without showing the current `docker-compose.yml` and `proxy/` contents
+   first. An assistant did exactly this once, which also silently dropped
+   the `data:` volume (thumbnails) and republished a host port on `app` that
+   then fronted nothing. Diagnosing it cost hours because the symptom (502,
+   then "waiting for MySQL forever") pointed nowhere near the real cause.
 
-**`access_type: offline` with `prompt: consent`.** Both are needed for Google to
-return a refresh token. Without them, uploads stop working an hour after sign-in.
-The cost is that the permission screen appears on every sign-in.
+2. **`app` and `mysql` must never publish a host port** once Caddy is in
+   front. Caddy reaches `app` as `app:3000` over the internal Compose
+   network. A published port on `app` is an unencrypted path that bypasses
+   TLS entirely, and Google sign-in would fail on it anyway since the OAuth
+   callback is registered against the HTTPS hostname specifically.
 
-**Only the Drive file ID is stored.** URLs are derived at render time in
-`src/lib/links.ts`. IDs are permanent; Drive's URL formats are not.
+3. **`DATABASE_URL` must use the Compose service name `mysql`**, never
+   `127.0.0.1` or `localhost`. Inside the `app` container, `127.0.0.1` means
+   the `app` container itself — nothing listens on 3306 there. This produces
+   an infinite, silent "Waiting for MySQL…" with no error, because nothing
+   ever actually fails; it just never succeeds.
 
-**Thumbnails live in MySQL**, as a BLOB column on the book row. Drive returns a
-`thumbnailLink`, but it expires after a few hours and is rate-limited - and a
-disk file wouldn't survive a redeploy on a host with no persistent disk.
+4. **`docker-entrypoint.sh`'s `prisma db push` line must keep
+   `--accept-data-loss`.** Without it, a schema change that needs
+   confirmation (e.g., a new unique constraint) can't prompt inside a
+   non-interactive container — the command just exits non-zero and the
+   entrypoint's retry loop treats that identically to "MySQL isn't ready
+   yet," producing an indefinite hang with zero visible error. This already
+   consumed a full debugging session once. If you remove this flag,
+   understand you are reintroducing that exact failure mode.
 
-**Filenames are numbered per faculty, not title-based.** A book becomes
-`3.Sok Pisey.pdf` inside its faculty's Drive folder, where the number is
-`prisma.book.count({ where: { facultyFolderId } }) + 1` at upload time -
-scoped to `facultyFolderId`, not `facultyId` alone, so switching the active
-year folder on the Storage page starts each faculty back at 1 rather than
-continuing a lifetime count. Books uploaded before this existed have
-`sequenceNumber: null` and keep their original title-based filename; nothing
-renumbers them retroactively.
+5. **YAML indentation in `docker-compose.yml`:** service names at 2 spaces,
+   their own keys at 4. Get this wrong and a service silently nests inside
+   the one above it, producing a "mapping key already defined" error that
+   doesn't obviously point at indentation. Always run
+   `docker compose config >/dev/null && echo ok` after editing, before `up`.
 
-**The PDF check is on the file header.** A reported MIME type and a `.pdf` suffix
-are both spoofable; `%PDF-` in the first five bytes is not.
+6. **`docker compose up` recreates containers and picks up `.env`/config
+   changes; `docker compose restart` does not.** After editing `.env`, use
+   `docker compose up -d app` (or the relevant service), not `restart`.
+   `restart` is correct only for a bind-mounted file like the Caddyfile,
+   which is read fresh at container start regardless.
 
-**The database row is written before the upload**, as `PENDING`. If the upload or
-the permission call fails, the Drive file is deleted and the row is marked
-`FAILED` with the reason.
+7. **Check every environment variable name character-by-character before
+   assuming a config is correct.** `DUCKDNS_TOKEN` was once typo'd as
+   `DUCKDN_TOKEN` in the Caddyfile — Caddy doesn't error on an unknown
+   template variable, it silently expands to empty, so the certificate
+   request failed with a message about an empty token that gave no hint
+   the real problem was a one-character typo three files away.
 
-**Search relies on MySQL's collation.** Prisma's `mode: "insensitive"` is
-PostgreSQL-only and errors on MySQL. `utf8mb4_unicode_ci` is already
-case-insensitive, and the compose file pins it.
+8. **State exact file paths with every change**, relative to `/opt/book-portal`
+   on the VM or the equivalent Windows checkout path. Don't say "update the
+   compose file" — say `/opt/book-portal/docker-compose.yml`.
+
+9. **Never invent or assume a schema shape** — see §0. Read
+   `prisma/schema.prisma` fresh every time before writing a migration,
+   query, or seed change that depends on field names.
 
 ---
 
-## Layout
+## 7. Known open issues — check here before re-solving from scratch
 
-```
-prisma/schema.prisma          User, Faculty, Book, Role, BookStatus (MySQL)
-prisma/seed.ts                faculty list - edit this
-src/auth.config.ts            edge-safe auth (imported by middleware)
-src/auth.ts                   full auth, stores the Drive refresh token
-src/lib/drive.ts              all Google Drive calls, as the signed-in user
-src/lib/pdf.ts                validation + metadata schema
-src/lib/links.ts              Drive URL builders
-src/lib/storage.ts            thumbnail read/write
-src/app/page.tsx              landing + sign in
-src/app/storage/page.tsx      choose a Drive folder
-src/app/books/page.tsx        catalogue, faculty rail, search
-src/app/books/[id]/page.tsx   embedded reader
-src/app/upload/page.tsx       add a book
-src/app/api/drive/            locations, folders, destination
-src/app/api/books/            list, upload, detail, delete, thumbnail
-src/components/               FirstPagePlate, UploadForm, StoragePicker, BookCard, Nav
-```
+| Issue | Status | Already considered |
+|---|---|---|
+| Public internet access | **Unresolved.** `ruaportal.duckdns.org` resolves to a private LAN IP — reachable on campus Wi-Fi only, not from mobile data or off-campus. | Oracle Cloud Free Tier (card declined at signup); DigitalOcean (no free tier, $4–12/mo, only briefly tested with signup credit); Cloudflare Tunnel (**not compatible** with a DuckDNS-hosted domain without Cloudflare's $200/mo Business plan for partial CNAME setup — Tunnel needs Cloudflare to be authoritative for the zone); Tailscale Funnel (viable and free, but Tailscale's own docs frame it for personal/ephemeral use, not production); a small VPS as a WireGuard relay in front of the campus VM (viable, more moving parts). **Recommended actual fix, not yet actioned:** request `portal.rua.edu.kh` and a real public IP from RUA IT — solves the hostname, the certificate, and the reachability problem in one step, and was the plan before the DuckDNS path was taken as a faster interim. |
+| Pre-fix thumbnails | **Unconfirmed.** Files exist on disk in `/app/data/thumbnails`, and `hasThumb=1` for every row in MySQL. A `curl` test without an authenticated session correctly 307-redirected to sign-in — that only proved the route requires auth, it did not confirm whether the images actually render for a signed-in user. Verify in an actual signed-in browser tab before assuming this is either broken or fixed. |
+| Mangled characters in at least one title | **Not fixed.** At least one stored title (`Farmer's Knowledge…`) shows corrupted apostrophe bytes, visible via `mysql` CLI output. Cause not yet isolated — check `SHOW VARIABLES LIKE 'character_set%';` inside the MySQL container against the connection charset actually used by Prisma, and check whether the source PDF/OCR text was already mis-encoded before insert. |
+| Hard delete, no undo | **By design, possibly worth revisiting.** Deleting a `Book` as admin removes the MySQL row, the Drive file, and the thumbnail — all three, immediately, no trash/undo. The Drive deletion is wrapped in a swallowed error (`.catch(() => {})`) so a Drive-side failure never blocks the deletion — but that also means a failed Drive delete can leave an orphaned file in Drive with nothing in the catalogue pointing to it, invisible from the UI. A soft-delete (`ARCHIVED` status, matching the existing `BookStatus` enum pattern) was discussed as a future option, not built. |
 
-Two things not to undo. Prisma maps a bare `String` to `VARCHAR(191)` on MySQL,
-which truncates real book titles, so `title`, `author` and `description` carry
-explicit `@db` types. And the auth config is split in two because
-`middleware.ts` runs on the Edge runtime, which cannot load Prisma — merging
-`auth.config.ts` back into `auth.ts` compiles, then fails at runtime.
+---
+
+## 8. Before you change anything — protocol
+
+1. Read the live file(s) you're about to touch. Don't trust a description
+   from this document, a chat log, or memory of "how this usually looks."
+2. State which exact file(s), by full path, you're about to change and why.
+3. For `docker-compose.yml` or anything under `proxy/`: show the current
+   content back before proposing a replacement, and confirm the change
+   preserves — don't just assume it preserves — every currently-published
+   port, every volume, and every service.
+4. After any compose edit: `docker compose config >/dev/null && echo ok`
+   before `up`.
+5. After any `.env` edit: `docker compose up -d <service>`, not `restart`,
+   for the change to take effect.
+6. If a container hangs on start with no clear error in
+   `docker compose logs`, suspect a swallowed error before suspecting
+   "it just needs more time" — see incident #4 in §6.
+7. Push happens from the Windows development machine, not the VM. The VM's
+   deploy key is read-only by design (§5) — don't try to work around it.
+
+---
+
+## 9. Working style expected on this project
+
+Direct, no narration of process. State file paths explicitly with every
+code change. Execute given commands as given, without re-explaining unless
+something actually goes wrong. Assume technical competence; explanations are
+for surprising or load-bearing facts, not routine ones.
