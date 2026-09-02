@@ -1,7 +1,3 @@
-# An explicit project name, so containers, networks and volumes are namespaced
-# regardless of what the directory is called. Without it Compose derives the
-# name from the folder, and two projects in similarly named folders can end up
-# fighting over the same resources.
 name: book-portal
 
 services:
@@ -14,18 +10,10 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    # utf8mb4 end to end, so Khmer titles and author names store and sort
-    # correctly. MySQL 8 defaults to this, but being explicit costs nothing.
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
       - mysqldata:/var/lib/mysql
-    # Deliberately no `ports:`. The app reaches this over the compose network,
-    # so nothing is published on the host and there is no chance of colliding
-    # with a MySQL another project already has on 3306.
     healthcheck:
-      # Runs MySQL's own client inside the MySQL container, so there is no
-      # MariaDB-client TLS mismatch to work around. No --silent: if the ping
-      # fails you want to see why, not watch an endless "waiting" loop.
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\""]
       interval: 5s
       timeout: 5s
@@ -40,14 +28,27 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+    volumes:
+      - data:/app/data
+
+  caddy:
+    build: ./proxy
+    container_name: portal_caddy
+    restart: unless-stopped
     ports:
-      # Host 3100, container 3000. Change the left number only - the right one
-      # is what Next.js listens on inside the container. 3100 keeps this clear
-      # of anything already using 3000 on the host.
-      - "${HOST_PORT:-3100}:3000"
-    # Nothing needs mounting on the app container - thumbnails live in MySQL
-    # alongside the catalogue, and Drive access is granted by each user at
-    # sign-in, so there are no key files to manage either.
+      - "80:80"
+      - "443:443"
+    environment:
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN}
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - app
 
 volumes:
   mysqldata:
+  data:
+  caddydata:
+  caddyconfig:
