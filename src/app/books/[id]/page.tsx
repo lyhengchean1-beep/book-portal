@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { auth, canDelete } from "@/auth";
+import { auth, canDelete, canEditBook } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import Nav from "@/components/Nav";
 import { drivePreviewUrl, driveViewUrl, driveDownloadUrl } from "@/lib/links";
 import { titleCase } from "@/lib/text";
 import DeleteBookButton from "@/components/DeleteBookButton";
+import EditBookButton from "@/components/EditBookButton";
 
 export const dynamic = "force-dynamic";
 
@@ -26,15 +27,20 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
   if (!session) redirect("/");
 
   const { id } = await params;
-  const book = await prisma.book.findUnique({
-    where: { id },
-    include: { faculty: true, uploadedBy: { select: { name: true, email: true } } },
-    omit: { thumbnail: true },
-  });
+  const [book, faculties] = await Promise.all([
+    prisma.book.findUnique({
+      where: { id },
+      include: { faculty: true, uploadedBy: { select: { name: true, email: true } } },
+      omit: { thumbnail: true },
+    }),
+    prisma.faculty.findMany({ orderBy: { name: "asc" } }),
+  ]);
 
   if (!book || book.status !== "READY" || !book.driveFileId) notFound();
 
   const title = titleCase(book.title);
+  const isOwner = book.uploadedById === session.user.id;
+  const canEdit = canEditBook(session.user.role, isOwner);
   const downloadsOff = process.env.BLOCK_DOWNLOADS === "true";
   const added = new Date(book.createdAt).toLocaleDateString("en-GB", {
     day: "2-digit",
@@ -116,9 +122,22 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
               <Row label="Added on" value={added} />
             </dl>
 
-            {canDelete(session.user.role) && (
+            {(canEdit || canDelete(session.user.role)) && (
               <div className="mt-6 border-t border-line pt-5">
-                <DeleteBookButton id={book.id} title={title} />
+                {canEdit && (
+                  <EditBookButton
+                    id={book.id}
+                    title={book.title}
+                    author={book.author}
+                    facultyId={book.facultyId}
+                    faculties={faculties}
+                  />
+                )}
+                {canDelete(session.user.role) && (
+                  <div className={canEdit ? "mt-4" : ""}>
+                    <DeleteBookButton id={book.id} title={title} />
+                  </div>
+                )}
               </div>
             )}
           </aside>

@@ -308,3 +308,41 @@ export async function restrictDownload(drive: drive_v3.Drive, fileId: string) {
 export async function deleteFile(drive: drive_v3.Drive, fileId: string) {
   await drive.files.delete({ fileId, supportsAllDrives: true });
 }
+
+/**
+ * Current parent folder IDs of a file.
+ *
+ * Needed before moving a file whose folder we do not already track in the
+ * database - a legacy book uploaded before facultyFolderId existed has no
+ * stored location to remove it from, so Drive has to be asked directly.
+ */
+export async function getFileParents(drive: drive_v3.Drive, fileId: string): Promise<string[]> {
+  const res = await drive.files.get({
+    fileId,
+    fields: "parents",
+    supportsAllDrives: true,
+  });
+  return res.data.parents ?? [];
+}
+
+/**
+ * Moves a file to a different folder and/or renames it, in one Drive call.
+ *
+ * Used when a book's faculty is edited: the file leaves its old faculty
+ * folder for the new one, and its name (which embeds the sequence number
+ * and author) is updated to match. `addParents`/`removeParents` are
+ * comma-joined ID strings, matching the Drive API's own parameter shape.
+ */
+export async function moveAndRenameFile(
+  drive: drive_v3.Drive,
+  opts: { fileId: string; name?: string; addParents?: string; removeParents?: string },
+) {
+  const { fileId, name, addParents, removeParents } = opts;
+  await drive.files.update({
+    fileId,
+    ...(addParents ? { addParents } : {}),
+    ...(removeParents ? { removeParents } : {}),
+    requestBody: name ? { name } : {},
+    supportsAllDrives: true,
+  });
+}

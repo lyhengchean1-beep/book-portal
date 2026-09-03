@@ -99,3 +99,13 @@ export function canDelete(role?: Role) {
 export function canAdmin(role?: Role) {
   return role === "ADMIN";
 }
+
+/**
+ * Editing a book - including moving its file to a different faculty's Drive
+ * folder - is allowed for an admin on any book, or for an uploader on a book
+ * they added themselves. `isOwner` is a data check (book.uploadedById), not
+ * a role, so it is computed by the caller and passed in.
+ */
+export function canEditBook(role: Role | undefined, isOwner: boolean) {
+  return role === "ADMIN" || (isOwner && canUpload(role));
+}
