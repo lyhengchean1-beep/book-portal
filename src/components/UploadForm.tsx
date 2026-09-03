@@ -164,10 +164,36 @@ export default function UploadForm({
 
     const savedTitle = title.trim();
 
+    let res: Response;
     try {
-      const res = await fetch("/api/books", { method: "POST", body });
-      const json = await res.json();
+      res = await fetch("/api/books", { method: "POST", body });
+    } catch {
+      // fetch() itself never got a response back - a real network failure
+      // (connection dropped, DNS, offline). There is no status code to show.
+      pushToast({
+        kind: "error",
+        title: "The upload did not finish.",
+        detail: "Check the connection and try again. Nothing was saved.",
+      });
+      return;
+    }
 
+    let json: any;
+    try {
+      json = await res.json();
+    } catch {
+      // A response DID come back, just not one this app sent - most often an
+      // intermediary (proxy, timeout page) returning HTML instead of JSON.
+      // The status code narrows this down a lot in the server log.
+      pushToast({
+        kind: "error",
+        title: "The upload did not finish.",
+        detail: `The server sent back something that wasn't JSON (HTTP ${res.status}). Nothing was saved. If this keeps happening with larger files, check the server log for that status code around this time.`,
+      });
+      return;
+    }
+
+    try {
       if (!res.ok) {
         // The server refused it - most often because the same title and author
         // are already catalogued. Offer the existing record instead of just

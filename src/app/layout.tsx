@@ -1,9 +1,21 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Book Portal — Faculty Library",
   description: "Add a book to the shared library, or find one by faculty.",
+};
+
+// Explicit on purpose: this layout already hand-authors a <head> below for
+// font links, and Next.js's own metadata/viewport resolution is what merges
+// tags like this into that <head> - relying on the implicit framework
+// default here leaves it unclear whether every page is actually getting a
+// device-width viewport rather than a fixed one, which is the difference
+// between a page that reflows on a phone and one that renders desktop-sized
+// and gets shrunk to fit.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

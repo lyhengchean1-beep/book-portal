@@ -2,5 +2,14 @@ ruaportal.duckdns.org {
     tls {
         dns duckdns {env.DUCKDNS_TOKEN}
     }
-    reverse_proxy app:3000
+    reverse_proxy app:3000 {
+        # Matches the app's own `maxDuration = 300` on the upload route
+        # (src/app/api/books/route.ts) - a large PDF on slow campus wifi can
+        # legitimately take a while to arrive; nothing here should time it
+        # out before the app itself would.
+        transport http {
+            read_timeout 300s
+            write_timeout 300s
+        }
+    }
 }
