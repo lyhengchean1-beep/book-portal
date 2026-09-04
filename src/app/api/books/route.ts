@@ -3,6 +3,7 @@ import { auth, canUpload } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { bookMetadataSchema, validatePdf } from "@/lib/pdf";
 import { saveThumbnail, deleteThumbnail } from "@/lib/storage";
+import { claimSequenceNumber } from "@/lib/sequence";
 import {
   getStorageDrive,
   activeYearFolder,
@@ -163,16 +164,14 @@ export async function POST(req: Request) {
 
     // 3.5. Claim this book's number within that folder. Scoped to the
     // folder rather than just the faculty, so switching the active year on
-    // the Storage page starts each faculty back at 1. A simultaneous
-    // upload to the same faculty could in principle race here; the unique
-    // constraint on (facultyFolderId, sequenceNumber) turns that into a
-    // clear failure this route already knows how to roll back, rather
-    // than two files silently claiming the same number.
-    const sequenceNumber = (await prisma.book.count({ where: { facultyFolderId } })) + 1;
-    await prisma.book.update({
-      where: { id: book.id },
-      data: { facultyFolderId, sequenceNumber },
-    });
+    // the Storage page starts each faculty back at 1. See claimSequenceNumber
+    // for why this retries instead of just failing on a collision.
+    const sequenceNumber = await claimSequenceNumber(facultyFolderId, (n) =>
+      prisma.book.update({
+        where: { id: book.id },
+        data: { facultyFolderId, sequenceNumber: n },
+      }),
+    );
 
     // 4. Upload the PDF into that folder.
     const buffer = Buffer.from(await pdf.arrayBuffer());

@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { auth, canUpload } from "@/auth";
-import { extractCoverFields, NoExtractorError } from "@/lib/extract";
+import { extractCoverFieldsResilient, NoExtractorError } from "@/lib/extract";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 /** Roughly 6 MB of base64, which is far more than a page render needs. */
 const MAX_IMAGE_CHARS = 8_000_000;
@@ -29,7 +29,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result = await extractCoverFields({
+    const result = await extractCoverFieldsResilient({
       imageBase64: image.slice(image.indexOf(",") + 1),
       text: typeof body?.text === "string" ? body.text : "",
     });

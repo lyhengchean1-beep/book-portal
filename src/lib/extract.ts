@@ -49,11 +49,13 @@ export async function extractCoverFields(opts: {
   imageBase64: string;
   /** Page-one text layer, if the PDF has one. Empty string for scans. */
   text: string;
+  /** Defaults to GEMINI_MODEL - overridable so the fallback attempt below can name a different one explicitly. */
+  model?: string;
 }): Promise<Extracted> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new NoExtractorError("GEMINI_API_KEY is not set.");
 
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = opts.model || process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
   const parts: Record<string, unknown>[] = [
     { inline_data: { mime_type: "image/jpeg", data: opts.imageBase64 } },
@@ -105,4 +107,65 @@ export async function extractCoverFields(opts: {
     title: title ? titleCase(title) : null,
     author: author ? normaliseName(author) : null,
   };
+}
+
+/**
+ * True for failures worth retrying: a 5xx from Gemini (the model is
+ * overloaded, not permanently broken - this is common enough under load to
+ * plan for), or a raw network failure that never got an HTTP response at
+ * all (DNS, connection reset). Both are the kind of thing that can succeed
+ * a few seconds later with nothing else changed. A 4xx, or GEMINI_API_KEY
+ * missing, will not - retrying those just delays the same failure.
+ */
+function isTransient(err: unknown): boolean {
+  if (!(err instanceof Error) || err instanceof NoExtractorError) return false;
+  if (/^Gemini returned 5\d\d:/.test(err.message)) return true;
+  // fetch() throws a plain TypeError("fetch failed") for DNS/connection
+  // failures, with the underlying cause (ENOTFOUND, EAI_AGAIN, ECONNRESET,
+  // ...) attached separately rather than in the message itself.
+  return err.message === "fetch failed";
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RETRY_BACKOFF_MS = [500, 2000];
+
+async function withRetries(
+  opts: { imageBase64: string; text: string },
+  model: string,
+): Promise<Extracted> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await extractCoverFields({ ...opts, model });
+    } catch (err) {
+      if (attempt >= RETRY_BACKOFF_MS.length || !isTransient(err)) throw err;
+      await sleep(RETRY_BACKOFF_MS[attempt]);
+    }
+  }
+}
+
+/**
+ * Reads a cover, retrying transient failures on the configured model before
+ * giving the lighter GEMINI_FALLBACK_MODEL one attempt of its own. This is
+ * what the upload route should call - extractCoverFields itself stays a
+ * single, unretried attempt, since the fallback needs to name its own model
+ * rather than inherit whichever one just failed.
+ */
+export async function extractCoverFieldsResilient(opts: {
+  imageBase64: string;
+  text: string;
+}): Promise<Extracted> {
+  const primaryModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  try {
+    return await withRetries(opts, primaryModel);
+  } catch (err) {
+    const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash-lite";
+    if (err instanceof NoExtractorError || !isTransient(err) || fallbackModel === primaryModel) {
+      throw err;
+    }
+    console.error(`[extract] ${primaryModel} exhausted its retries, trying ${fallbackModel}`, err);
+    return await withRetries(opts, fallbackModel);
+  }
 }

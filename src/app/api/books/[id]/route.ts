@@ -12,7 +12,7 @@ import {
   DriveAuthError,
   DriveConfigError,
 } from "@/lib/drive";
-import { closeSequenceGap, sequencedFileName } from "@/lib/sequence";
+import { closeSequenceGap, claimSequenceNumber, sequencedFileName } from "@/lib/sequence";
 import { deleteThumbnail } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -204,14 +204,26 @@ export async function PATCH(req: Request, { params }: Ctx) {
         facultyId: newFaculty.id,
         folderName: newFaculty.driveFolder ?? newFaculty.code,
       });
-      newSequenceNumber = (await prisma.book.count({ where: { facultyFolderId: newFacultyFolderId } })) + 1;
+
+      // Claim the slot in the destination folder before touching Drive, so
+      // the file only ever moves once the new number is confirmed - see
+      // claimSequenceNumber for why a plain count-then-write isn't safe
+      // when an upload could be claiming a number in the same folder at the
+      // same time.
+      const destFolderId = newFacultyFolderId;
+      newSequenceNumber = await claimSequenceNumber(destFolderId, (n) =>
+        prisma.book.update({
+          where: { id: book.id },
+          data: { facultyId: newFaculty!.id, facultyFolderId: destFolderId, sequenceNumber: n },
+        }),
+      );
 
       if (book.driveFileId) {
         await moveAndRenameFile(drive, {
           fileId: book.driveFileId,
           addParents: newFacultyFolderId,
           removeParents: oldFacultyFolderId!,
-          name: sequencedFileName(newSequenceNumber!, author),
+          name: sequencedFileName(newSequenceNumber, author),
         });
       }
     } else if (book.driveFileId) {
@@ -234,15 +246,16 @@ export async function PATCH(req: Request, { params }: Ctx) {
       });
     }
 
+    // For a sequenced move, facultyId/facultyFolderId/sequenceNumber are
+    // already committed above (claimed together, so a retry never leaves
+    // them out of step with each other) - this only still needs to set it
+    // for the legacy and no-faculty-change paths.
     const updated = await prisma.book.update({
       where: { id: book.id },
       data: {
         title,
         author,
-        facultyId: newFaculty.id,
-        ...(wasSequenced
-          ? { facultyFolderId: newFacultyFolderId, sequenceNumber: newSequenceNumber }
-          : {}),
+        ...(wasSequenced ? {} : { facultyId: newFaculty.id }),
       },
       include: { faculty: true },
       omit: { thumbnail: true },

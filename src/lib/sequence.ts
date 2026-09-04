@@ -13,6 +13,48 @@ export function sequencedFileName(sequenceNumber: number, author: string) {
 }
 
 /**
+ * Claims the next sequence number in a faculty folder.
+ *
+ * Counting the folder and writing the result back is two round trips, so two
+ * requests racing for the same folder can both count before either writes -
+ * this was already a known, documented trade-off (see the comment it used to
+ * live next to in books/route.ts), accepted because the unique constraint on
+ * (facultyFolderId, sequenceNumber) turns it into a clean failure rather
+ * than two files silently sharing a number. In production that "clean
+ * failure" turned out to mean a real, repeated upload failure for whoever
+ * lost the race - uploading a stack of books is the normal way to use this
+ * page, which makes near-simultaneous requests to the same folder the
+ * expected case, not a rare edge. So: catch exactly that collision and
+ * recount, rather than surface it.
+ *
+ * `apply` is whatever write actually claims the number - upload and edit
+ * claim it differently (a fresh row vs. an existing one), so the caller
+ * supplies it.
+ */
+export async function claimSequenceNumber(
+  facultyFolderId: string,
+  apply: (sequenceNumber: number) => Promise<unknown>,
+  attempts = 5,
+): Promise<number> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const sequenceNumber = (await prisma.book.count({ where: { facultyFolderId } })) + 1;
+    try {
+      await apply(sequenceNumber);
+      return sequenceNumber;
+    } catch (err) {
+      const lostTheRace = typeof err === "object" && err !== null && (err as { code?: string }).code === "P2002";
+      if (!lostTheRace || attempt === attempts) throw err;
+      // Someone else's request claimed this number between our count and our
+      // write. Loop around and count again - `attempts` exists only so a
+      // genuinely broken constraint fails loudly instead of looping forever.
+    }
+  }
+  // Unreachable - the loop above always returns or throws - but keeps the
+  // return type honest instead of implying `undefined` is possible.
+  throw new Error(`Could not claim a sequence number in ${facultyFolderId} after ${attempts} attempts.`);
+}
+
+/**
  * Closes the gap a book leaves behind in its old facultyFolderId.
  *
  * Every remaining book in that folder with a higher sequenceNumber moves
