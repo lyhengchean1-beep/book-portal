@@ -211,8 +211,8 @@ export async function PATCH(req: Request, { params }: Ctx) {
       // when an upload could be claiming a number in the same folder at the
       // same time.
       const destFolderId = newFacultyFolderId;
-      newSequenceNumber = await claimSequenceNumber(destFolderId, (n) =>
-        prisma.book.update({
+      newSequenceNumber = await claimSequenceNumber(destFolderId, (tx, n) =>
+        tx.book.update({
           where: { id: book.id },
           data: { facultyId: newFaculty!.id, facultyFolderId: destFolderId, sequenceNumber: n },
         }),

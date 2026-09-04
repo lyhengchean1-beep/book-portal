@@ -166,8 +166,8 @@ export async function POST(req: Request) {
     // folder rather than just the faculty, so switching the active year on
     // the Storage page starts each faculty back at 1. See claimSequenceNumber
     // for why this retries instead of just failing on a collision.
-    const sequenceNumber = await claimSequenceNumber(facultyFolderId, (n) =>
-      prisma.book.update({
+    const sequenceNumber = await claimSequenceNumber(facultyFolderId, (tx, n) =>
+      tx.book.update({
         where: { id: book.id },
         data: { facultyFolderId, sequenceNumber: n },
       }),

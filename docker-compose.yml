@@ -30,6 +30,15 @@ services:
         condition: service_healthy
     volumes:
       - data:/app/data
+    # This app makes outbound calls to Google APIs (Drive, Gemini, OAuth) -
+    # `EAI_AGAIN` against two different *.googleapis.com hosts in the same
+    # session points at DNS resolution on this container generally rather
+    # than either service specifically. Pinning to known-reliable public
+    # resolvers instead of whatever the host forwards is a safe default
+    # regardless of whether that turns out to be the whole story.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
 
   caddy:
     build: ./proxy
